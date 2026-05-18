@@ -172,7 +172,7 @@ export default function SingleMode({
                     📋 複製信件
                   </button>
                   <button type="button" className="btn btn-primary" disabled={isSendingEmail} onClick={onSendEmail}>
-                    {directSendEnabled ? '📧 確認並直接寄出' : '📧 用 Gmail 寄送'}
+                    {directSendEnabled ? '📧 確認並自動寄出' : '📧 用 Gmail 開啟草稿（手動傳送）'}
                   </button>
                 </div>
               </>

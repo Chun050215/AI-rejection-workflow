@@ -275,7 +275,7 @@ export default function BatchMode({
             <button
               type="button"
               className="btn btn-gold"
-              onClick={onSendBatchEmails}
+              onClick={() => onSendBatchEmails()}
               disabled={batch.isSendingEmail || !sendableCount}
             >
               {batch.isSendingEmail
@@ -283,8 +283,8 @@ export default function BatchMode({
                   ? '寄送中...'
                   : '開啟 Gmail 中...'
                 : directSendEnabled
-                  ? '📧 確認並批量直接寄出'
-                  : '📧 用 Gmail 批量寄送'}
+                  ? '📧 確認並批量自動寄出'
+                  : '📧 用 Gmail 批量開啟（需手動傳送）'}
               {sendableCount > 0 && !batch.isSendingEmail && `（${sendableCount} 封）`}
             </button>
             <button type="button" className="btn btn-secondary" onClick={onDownloadMailMerge}>

@@ -1,71 +1,93 @@
 export const SEND_METHODS = {
   gmail: 'gmail',
-  emailjs: 'emailjs',
-  appsScript: 'appsScript',
+  gmailApi: 'gmailApi',
 };
+
+const LEGACY_METHODS = new Set(['emailjs', 'appsScript']);
+
+function resolveGmailClientIdLocal(email) {
+  const fromEnv = import.meta.env.VITE_GOOGLE_CLIENT_ID?.trim();
+  const fromSettings = email?.gmailApiClientId?.trim();
+  return fromSettings || fromEnv || '';
+}
+
+function isGmailApiTokenValid() {
+  try {
+    const auth = JSON.parse(localStorage.getItem('gmailApiAuth') || 'null');
+    return !!(auth?.accessToken && auth?.expiresAt > Date.now());
+  } catch {
+    return false;
+  }
+}
+
+export function isGmailApiConfigured(email) {
+  return !!(resolveGmailClientIdLocal(email) && isGmailApiTokenValid());
+}
+
+function normalizeSendMethod(savedMethod, gmailApiOk) {
+  if (LEGACY_METHODS.has(savedMethod)) {
+    return gmailApiOk ? SEND_METHODS.gmailApi : SEND_METHODS.gmail;
+  }
+  if (savedMethod === SEND_METHODS.gmailApi || savedMethod === SEND_METHODS.gmail) {
+    return savedMethod;
+  }
+  return SEND_METHODS.gmail;
+}
 
 export function loadEmailSettings() {
   try {
     const saved = JSON.parse(localStorage.getItem('emailSettings') || '{}');
-    const emailjs = {
-      serviceId: saved.emailjs?.serviceId || '',
-      templateId: saved.emailjs?.templateId || '',
-      publicKey: saved.emailjs?.publicKey || '',
-    };
     const draft = {
       gmail: saved.gmail || saved.from || '',
-      emailjs,
-      appsScriptUrl: saved.appsScriptUrl || '',
-      sendMethod: saved.sendMethod || SEND_METHODS.gmail,
+      gmailApiClientId: saved.gmailApiClientId || '',
     };
-    const emailjsOk = isEmailjsConfigured(draft);
+    const gmailApiOk = isGmailApiConfigured(draft);
+    const sendMethod = normalizeSendMethod(saved.sendMethod, gmailApiOk);
+
     return {
       gmail: draft.gmail,
       subjectTemplate: saved.subjectTemplate || '{company} 應徵職缺回覆－{position}',
-      autoSendAfterBatch: emailjsOk
+      autoSendAfterBatch: gmailApiOk
         ? saved.autoSendAfterBatch !== false
         : !!saved.autoSendAfterBatch,
-      emailjs,
-      appsScriptUrl: draft.appsScriptUrl,
-      sendMethod: draft.sendMethod,
+      gmailApiClientId: draft.gmailApiClientId,
+      sendMethod,
     };
   } catch {
     return {
       gmail: '',
       subjectTemplate: '{company} 應徵職缺回覆－{position}',
       autoSendAfterBatch: false,
-      emailjs: { serviceId: '', templateId: '', publicKey: '' },
-      appsScriptUrl: '',
+      gmailApiClientId: '',
       sendMethod: SEND_METHODS.gmail,
     };
   }
 }
 
 export function saveEmailSettings(email) {
-  localStorage.setItem('emailSettings', JSON.stringify(email));
-}
-
-export function isEmailjsConfigured(email) {
-  const e = email?.emailjs;
-  return !!(e?.serviceId?.trim() && e?.templateId?.trim() && e?.publicKey?.trim());
-}
-
-export function isAppsScriptConfigured(email) {
-  return !!(email?.appsScriptUrl?.trim() && /^https:\/\/script\.google\.com\//.test(email.appsScriptUrl.trim()));
+  const { gmail, subjectTemplate, autoSendAfterBatch, gmailApiClientId, sendMethod } = email;
+  localStorage.setItem(
+    'emailSettings',
+    JSON.stringify({ gmail, subjectTemplate, autoSendAfterBatch, gmailApiClientId, sendMethod })
+  );
 }
 
 export function isDirectSendReady(email) {
-  const method = email?.sendMethod || SEND_METHODS.gmail;
-  if (method === SEND_METHODS.emailjs) return isEmailjsConfigured(email);
-  if (method === SEND_METHODS.appsScript) return isAppsScriptConfigured(email);
-  return false;
+  return (email?.sendMethod || SEND_METHODS.gmail) === SEND_METHODS.gmailApi && isGmailApiConfigured(email);
 }
 
 export function getSendMethodLabel(email) {
   const method = email?.sendMethod || SEND_METHODS.gmail;
-  if (method === SEND_METHODS.emailjs) return 'EmailJS 自動寄信';
-  if (method === SEND_METHODS.appsScript) return 'Google 試算表自動寄信';
-  return 'Gmail 撰寫頁（推薦）';
+  if (method === SEND_METHODS.gmailApi) return 'Gmail API 已連結';
+  return 'Gmail 手動過目';
+}
+
+export function isGmailApiMethod(email) {
+  return (email?.sendMethod || SEND_METHODS.gmail) === SEND_METHODS.gmailApi;
+}
+
+export function isGmailComposeMethod(email) {
+  return (email?.sendMethod || SEND_METHODS.gmail) === SEND_METHODS.gmail;
 }
 
 export function buildSubject(item, email, company) {

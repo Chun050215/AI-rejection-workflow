@@ -722,6 +722,18 @@
       font-size: 0.78rem;
       margin-top: 2px;
     }
+    .apps-script-steps {
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 12px 14px;
+      font-size: 0.85rem;
+    }
+    .apps-script-steps ol {
+      margin: 8px 0 0;
+      padding-left: 1.25rem;
+      line-height: 1.55;
+    }
     .checkbox-row {
       display: flex;
       align-items: center;

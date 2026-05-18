@@ -1,18 +1,30 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import {
   isDirectSendReady,
   getSendMethodLabel,
   SEND_METHODS,
 } from '../utils/emailSettings';
-import { APPS_SCRIPT_EMAIL_CODE } from '../constants/appsScriptEmail';
+import { GMAIL_API_SETUP_STEPS } from '../constants/gmailApiSetup';
+import {
+  connectGmailApi,
+  disconnectGmailApi,
+  getGmailApiAuth,
+  resolveGmailClientId,
+  isGmailApiConnected,
+} from '../utils/gmailApi';
 
-export default function EmailSettings({ email, onChange, onTestSend }) {
-  const [showScript, setShowScript] = useState(false);
+export default function EmailSettings({ email, onChange, onTestSend, onNotify }) {
+  const [connecting, setConnecting] = useState(false);
+  const [gmailAuth, setGmailAuth] = useState(() => getGmailApiAuth());
   const set = (key, val) => onChange({ ...email, [key]: val });
-  const setEmailjs = (key, val) =>
-    onChange({ ...email, emailjs: { ...email.emailjs, [key]: val } });
   const method = email.sendMethod || SEND_METHODS.gmail;
   const directReady = isDirectSendReady(email);
+  const clientId = resolveGmailClientId(email);
+  const envClientId = !!import.meta.env.VITE_GOOGLE_CLIENT_ID?.trim();
+
+  useEffect(() => {
+    setGmailAuth(getGmailApiAuth());
+  }, [email.sendMethod, email.gmailApiClientId]);
 
   const setMethod = (nextMethod) => {
     const next = { ...email, sendMethod: nextMethod };
@@ -22,6 +34,32 @@ export default function EmailSettings({ email, onChange, onTestSend }) {
     onChange(next);
   };
 
+  const handleConnectGmail = async () => {
+    setConnecting(true);
+    try {
+      const auth = await connectGmailApi(clientId);
+      setGmailAuth(auth);
+      onChange({
+        ...email,
+        sendMethod: SEND_METHODS.gmailApi,
+        gmail: email.gmail || auth.emailAddress || email.gmail,
+      });
+      onNotify?.(`已連結 Gmail：${auth.emailAddress}`, 'success');
+    } catch (e) {
+      onNotify?.(e.message || 'Gmail 連結失敗', 'error');
+    } finally {
+      setConnecting(false);
+    }
+  };
+
+  const handleDisconnectGmail = () => {
+    disconnectGmailApi();
+    setGmailAuth(null);
+    onNotify?.('已解除 Gmail API 連結', 'success');
+  };
+
+  const gmailConnected = isGmailApiConnected();
+
   return (
     <div className="email-settings">
       <h3>
@@ -29,7 +67,23 @@ export default function EmailSettings({ email, onChange, onTestSend }) {
         <span className="email-ready-badge">{getSendMethodLabel(email)}</span>
       </h3>
 
+      <p className="full email-hint email-hint-warn" style={{ marginBottom: 12 }}>
+        若要<strong>自動寄出</strong>並支援<strong>批次 API</strong>，請選「Gmail API」。「手動過目」僅開草稿，無法代按傳送。
+      </p>
+
       <div className="send-method-picker">
+        <label className={`send-method-option ${method === SEND_METHODS.gmailApi ? 'active' : ''}`}>
+          <input
+            type="radio"
+            name="sendMethod"
+            checked={method === SEND_METHODS.gmailApi}
+            onChange={() => setMethod(SEND_METHODS.gmailApi)}
+          />
+          <span>
+            <strong>Gmail API</strong>（推薦）
+            <small>OAuth 授權後自動寄信，批量使用 Gmail 批次請求（每批最多 100 封）</small>
+          </span>
+        </label>
         <label className={`send-method-option ${method === SEND_METHODS.gmail ? 'active' : ''}`}>
           <input
             type="radio"
@@ -38,32 +92,8 @@ export default function EmailSettings({ email, onChange, onTestSend }) {
             onChange={() => setMethod(SEND_METHODS.gmail)}
           />
           <span>
-            <strong>Gmail 撰寫頁</strong>（推薦）
-            <small>開啟 Gmail，過目後手動按傳送，免 API 授權</small>
-          </span>
-        </label>
-        <label className={`send-method-option ${method === SEND_METHODS.appsScript ? 'active' : ''}`}>
-          <input
-            type="radio"
-            name="sendMethod"
-            checked={method === SEND_METHODS.appsScript}
-            onChange={() => setMethod(SEND_METHODS.appsScript)}
-          />
-          <span>
-            <strong>Google 試算表腳本</strong>
-            <small>用你的 Gmail 自動寄，免 EmailJS</small>
-          </span>
-        </label>
-        <label className={`send-method-option ${method === SEND_METHODS.emailjs ? 'active' : ''}`}>
-          <input
-            type="radio"
-            name="sendMethod"
-            checked={method === SEND_METHODS.emailjs}
-            onChange={() => setMethod(SEND_METHODS.emailjs)}
-          />
-          <span>
-            <strong>EmailJS</strong>
-            <small>需正確授權 Gmail；scopes 錯誤請改上方兩種</small>
+            <strong>Gmail 手動過目</strong>
+            <small>開啟草稿，需自己在 Gmail 按傳送</small>
           </span>
         </label>
       </div>
@@ -91,66 +121,61 @@ export default function EmailSettings({ email, onChange, onTestSend }) {
           主旨變數：<code>{'{company}'}</code> <code>{'{position}'}</code> <code>{'{name}'}</code>
         </div>
 
-        {method === SEND_METHODS.appsScript && (
+        {method === SEND_METHODS.gmailApi && (
           <>
-            <div className="full">
-              <label>Apps Script 部署網址（結尾為 /exec）</label>
-              <input
-                type="url"
-                value={email.appsScriptUrl || ''}
-                onChange={(e) => set('appsScriptUrl', e.target.value)}
-                placeholder="https://script.google.com/macros/s/xxxxx/exec"
-              />
+            <div className="full apps-script-steps">
+              <strong>Google Cloud 設定（一次性）</strong>
+              <ol>
+                {GMAIL_API_SETUP_STEPS.map((step) => (
+                  <li key={step}>{step}</li>
+                ))}
+              </ol>
+              <a
+                href="https://console.cloud.google.com/apis/library/gmail.googleapis.com"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="btn btn-secondary btn-sm"
+                style={{ display: 'inline-block', marginTop: 8, marginRight: 8 }}
+              >
+                啟用 Gmail API ↗
+              </a>
             </div>
-            <div className="full">
-              <button type="button" className="btn btn-secondary btn-sm" onClick={() => setShowScript((v) => !v)}>
-                {showScript ? '隱藏' : '顯示'} Apps Script 程式碼
-              </button>
-            </div>
-            {showScript && (
+            {!envClientId && (
               <div className="full">
-                <textarea
-                  readOnly
-                  value={APPS_SCRIPT_EMAIL_CODE}
-                  rows={12}
-                  style={{ fontFamily: 'var(--mono)', fontSize: '0.72rem', width: '100%' }}
+                <label>OAuth 用戶端 ID</label>
+                <input
+                  type="text"
+                  value={email.gmailApiClientId || ''}
+                  onChange={(e) => set('gmailApiClientId', e.target.value)}
+                  placeholder="xxxxx.apps.googleusercontent.com"
                 />
-                <p className="csv-preview-note">
-                  script.google.com → 新專案 → 貼上 → 部署 → 網路應用程式 → 執行身分：我 → 存取：任何人
-                </p>
               </div>
             )}
-          </>
-        )}
-
-        {method === SEND_METHODS.emailjs && (
-          <>
-            <div>
-              <label>Service ID</label>
-              <input
-                type="text"
-                value={email.emailjs.serviceId}
-                onChange={(e) => setEmailjs('serviceId', e.target.value)}
-              />
-            </div>
-            <div>
-              <label>Template ID</label>
-              <input
-                type="text"
-                value={email.emailjs.templateId}
-                onChange={(e) => setEmailjs('templateId', e.target.value)}
-              />
-            </div>
-            <div className="full">
-              <label>Public Key</label>
-              <input
-                type="text"
-                value={email.emailjs.publicKey}
-                onChange={(e) => setEmailjs('publicKey', e.target.value)}
-              />
-            </div>
-            <div className="full email-hint email-hint-warn">
-              若出現 scopes 錯誤：EmailJS 刪除 Gmail 後重連，或改選「Gmail 撰寫頁」。
+            {envClientId && (
+              <div className="full email-hint">
+                已從環境變數 <code>VITE_GOOGLE_CLIENT_ID</code> 載入用戶端 ID
+              </div>
+            )}
+            <div className="full" style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+              {!gmailConnected ? (
+                <button
+                  type="button"
+                  className="btn btn-primary btn-sm"
+                  disabled={connecting || !clientId}
+                  onClick={handleConnectGmail}
+                >
+                  {connecting ? '連結中…' : '🔗 連結 Gmail'}
+                </button>
+              ) : (
+                <>
+                  <span className="email-ready-badge">
+                    已連結：{gmailAuth?.emailAddress || 'Gmail'}
+                  </span>
+                  <button type="button" className="btn btn-secondary btn-sm" onClick={handleDisconnectGmail}>
+                    解除連結
+                  </button>
+                </>
+              )}
             </div>
           </>
         )}

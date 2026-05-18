@@ -17,12 +17,11 @@ import { generateLetterLocal, streamText, buildPrompt } from './utils/letter';
 import {
   loadEmailSettings,
   saveEmailSettings,
-  isEmailjsConfigured,
   isDirectSendReady,
   SEND_METHODS,
 } from './utils/emailSettings';
 import { downloadMailMergeCsv, downloadTxt, openGmailCompose } from './utils/email';
-import { sendEmail, sendTestEmail } from './utils/emailSend';
+import { sendEmail, sendTestEmail, sendBatchViaGmailApi } from './utils/emailSend';
 
 let nextId = 4;
 const newBatchItem = (row) => ({
@@ -114,7 +113,7 @@ export default function App() {
       const nowReady = isDirectSendReady(next);
 
       if (next.autoSendAfterBatch && !nowReady) {
-        showToast('請先完成 Google 試算表或 EmailJS 設定，才能開啟自動寄出', 'error');
+        showToast('請先連結 Gmail API，才能開啟自動寄出', 'error');
         next = { ...next, autoSendAfterBatch: false };
       }
 
@@ -361,7 +360,7 @@ export default function App() {
 
     if (email.autoSendAfterBatch) {
       if (!isDirectSendReady(email)) {
-        showToast('已生成完成。請在寄信設定選擇「Google 試算表」或 EmailJS 並完成設定', 'error');
+        showToast('已生成完成。請在寄信設定連結 Gmail API 後才能自動寄出', 'error');
         return;
       }
       const sendable = generated.filter((i) => i.email?.trim() && i.result);
@@ -378,6 +377,7 @@ export default function App() {
 
   const directSendEnabled = isDirectSendReady(email);
   const useGmailCompose = (email.sendMethod || SEND_METHODS.gmail) === SEND_METHODS.gmail;
+  const useGmailApi = (email.sendMethod || SEND_METHODS.gmail) === SEND_METHODS.gmailApi;
 
   const sendItemEmail = async (item, silent = false) => {
     if (!item.email) {
@@ -431,9 +431,10 @@ export default function App() {
   };
 
   const sendBatchEmails = async (itemsOverride) => {
-    const source = itemsOverride ?? getActiveBatchItems();
+    const fromExplicitList = Array.isArray(itemsOverride);
+    const source = fromExplicitList ? itemsOverride : getActiveBatchItems();
     const items = source.filter((i) => {
-      const ready = itemsOverride ? i.result : i.status === 'done' && i.result;
+      const ready = fromExplicitList ? i.result : i.status === 'done' && i.result;
       return ready && i.email?.trim();
     });
     if (!items.length) {
@@ -490,6 +491,49 @@ export default function App() {
       return;
     }
 
+    if (useGmailApi) {
+      if (
+        !confirm(
+          `將透過 Gmail API 批次寄出 ${items.length} 封（每批最多 100 封）。\n\n請確認每封信已在 App 內過目。`
+        )
+      ) {
+        return;
+      }
+
+      setBatch((b) => ({ ...b, isSendingEmail: true }));
+      setEmailSendDone(0);
+      setEmailSendTotal(items.length);
+
+      try {
+        const results = await sendBatchViaGmailApi(items, email, company, (done) => {
+          setEmailSendDone(done);
+        });
+        let ok = 0;
+        for (const r of results) {
+          if (r.ok) {
+            ok++;
+            patchBatchItem(r.itemId, { emailStatus: 'sent', emailError: '' });
+          } else {
+            patchBatchItem(r.itemId, {
+              emailStatus: 'failed',
+              emailError: r.error || 'Gmail API 寄信失敗',
+            });
+          }
+        }
+        showToast(
+          ok === items.length
+            ? `Gmail API 批次寄送完成：${ok} 封`
+            : `Gmail API 寄送：${ok} 成功，${items.length - ok} 失敗`,
+          ok === items.length ? 'success' : 'error'
+        );
+      } catch (e) {
+        showToast(e.message || 'Gmail API 批次寄信失敗', 'error');
+      } finally {
+        setBatch((b) => ({ ...b, isSendingEmail: false }));
+      }
+      return;
+    }
+
     if (!confirm(`確定自動寄送 ${items.length} 封？\n\n請確認每封信已在 App 內過目。`)) {
       return;
     }
@@ -526,6 +570,7 @@ export default function App() {
           <EmailSettings
             email={email}
             onChange={updateEmail}
+            onNotify={showToast}
             onTestSend={async () => {
               try {
                 const r = await sendTestEmail(email, company);

@@ -1,4 +1,4 @@
-import { useState, useCallback, useMemo } from 'react';
+import { useState, useCallback, useMemo, useRef } from 'react';
 import BrandBar from './components/BrandBar';
 import AnimatedBackground from './components/AnimatedBackground';
 import WorkshopHero from './components/WorkshopHero';
@@ -14,8 +14,15 @@ import { countWords } from './utils/words';
 import { parseCsvContent } from './utils/csv';
 import { resolveReason } from './utils/reasonMatcher';
 import { generateLetterLocal, streamText, buildPrompt } from './utils/letter';
-import { loadEmailSettings, saveEmailSettings } from './utils/emailSettings';
-import { openGmailCompose, downloadMailMergeCsv, downloadTxt } from './utils/email';
+import {
+  loadEmailSettings,
+  saveEmailSettings,
+  isEmailjsConfigured,
+  isDirectSendReady,
+  SEND_METHODS,
+} from './utils/emailSettings';
+import { downloadMailMergeCsv, downloadTxt, openGmailCompose } from './utils/email';
+import { sendEmail, sendTestEmail } from './utils/emailSend';
 
 let nextId = 4;
 const newBatchItem = (row) => ({
@@ -75,23 +82,64 @@ export default function App() {
     processed: 0,
   });
   const [csvPreview, setCsvPreview] = useState([]);
+  /** 與 batch.items 同步，批量生成迴圈內立即可讀寫（避免 setState 尚未 commit） */
+  const batchItemsRef = useRef([]);
 
-  const updateEmail = useCallback((next) => {
-    setEmail(next);
-    saveEmailSettings(next);
+  const setBatchItems = useCallback((nextItems) => {
+    batchItemsRef.current = nextItems;
+    setBatch((b) => ({ ...b, items: nextItems }));
   }, []);
+
+  /** ref 為 [] 時仍用 batch.items（避免 ?? 把空陣列當成有效來源） */
+  const getActiveBatchItems = useCallback(() => {
+    const fromRef = batchItemsRef.current;
+    return fromRef.length > 0 ? fromRef : batch.items;
+  }, [batch.items]);
+
+  const patchBatchItem = useCallback((itemId, patch) => {
+    setBatch((b) => {
+      const base = batchItemsRef.current.length ? batchItemsRef.current : b.items;
+      if (!base.some((it) => it.id === itemId)) {
+        return b;
+      }
+      const next = base.map((it) => (it.id === itemId ? { ...it, ...patch } : it));
+      batchItemsRef.current = next;
+      return { ...b, items: next };
+    });
+  }, []);
+
+  const updateEmail = useCallback(
+    (next) => {
+      const wasReady = isDirectSendReady(email);
+      const nowReady = isDirectSendReady(next);
+
+      if (next.autoSendAfterBatch && !nowReady) {
+        showToast('請先完成 Google 試算表或 EmailJS 設定，才能開啟自動寄出', 'error');
+        next = { ...next, autoSendAfterBatch: false };
+      }
+
+      if (nowReady && !wasReady && (next.sendMethod || SEND_METHODS.gmail) !== SEND_METHODS.gmail) {
+        next = { ...next, autoSendAfterBatch: true };
+        showToast('自動寄信已就緒，已開啟「批量完成後自動寄出」');
+      }
+
+      setEmail(next);
+      saveEmailSettings(next);
+    },
+    [email, showToast]
+  );
 
   const letterParams = useCallback(
     (item) => ({
       name: item.name,
       position: item.position,
-      reason: item.reason,
+      reason: item.reason?.trim() || defaultBatchReason,
       company,
       tone,
       lang,
       resume: item.resume || '',
     }),
-    [company, tone, lang]
+    [company, tone, lang, defaultBatchReason]
   );
 
   const promptPreview = useMemo(
@@ -187,32 +235,42 @@ export default function App() {
 
   const applyParsedRows = (parsed) => {
     const enriched = enrichRowsWithReason(parsed);
+    const items = enriched.map((row) =>
+      newBatchItem({ ...row, reason: row.reason || defaultBatchReason })
+    );
     setCsvPreview(enriched);
-    setBatch((b) => ({ ...b, items: enriched.map(newBatchItem), processed: 0 }));
+    setBatchItems(items);
+    setBatch((b) => ({ ...b, processed: 0 }));
+    return items;
   };
 
   const parseCsv = () => {
     const parsed = parseCsvContent(batch.csvText, defaultBatchReason);
     if (!parsed.length) {
       showToast('無法解析名單，請確認格式：姓名,職位 或 姓名,職位,Email', 'error');
-      return;
+      return [];
     }
-    applyParsedRows(parsed);
-    showToast(`已載入 ${parsed.length} 位應徵者（婉拒原因已自動填入）`);
+    const items = applyParsedRows(parsed);
+    showToast(`已載入 ${parsed.length} 位。請按「開始批量生成」產生感謝信`);
+    return items;
+  };
+
+  const parseCsvAndGenerate = async () => {
+    const items = parseCsv();
+    if (!items.length) return;
+    await runBatchGeneration(items);
   };
 
   const applyReasonToAll = () => {
-    setBatch((b) => ({
-      ...b,
-      items: b.items.map((it) => ({
-        ...it,
-        reason: resolveReason(
-          { note: it.note, position: it.position, reason: '' },
-          defaultBatchReason,
-          autoDetectReason
-        ),
-      })),
+    const next = batchItemsRef.current.map((it) => ({
+      ...it,
+      reason: resolveReason(
+        { note: it.note, position: it.position, reason: '' },
+        defaultBatchReason,
+        autoDetectReason
+      ),
     }));
+    setBatchItems(next);
     setCsvPreview((prev) =>
       prev.map((row) => ({
         ...row,
@@ -223,91 +281,103 @@ export default function App() {
   };
 
   const updateItemReason = (itemId, reason) => {
-    setBatch((b) => ({
-      ...b,
-      items: b.items.map((it) => (it.id === itemId ? { ...it, reason } : it)),
-    }));
+    patchBatchItem(itemId, { reason });
   };
 
   const updateItemResume = (itemId, resume) => {
-    setBatch((b) => ({
-      ...b,
-      items: b.items.map((it) => (it.id === itemId ? { ...it, resume } : it)),
-    }));
+    patchBatchItem(itemId, { resume });
   };
 
-  const processItem = async (itemId) => {
-    let item = null;
-    setBatch((b) => {
-      item = b.items.find((i) => i.id === itemId);
-      return {
-        ...b,
-        items: b.items.map((it) =>
-          it.id === itemId ? { ...it, status: 'processing', result: '', error: '', expanded: true } : it
-        ),
-      };
-    });
-    let acc = '';
-    if (!item) return;
-    const params = letterParams(item);
+  const processItem = async (item) => {
+    const reason = item.reason?.trim() || defaultBatchReason;
+    const payload = { ...item, reason };
+
+    if (!payload.name?.trim() || !payload.position?.trim()) {
+      patchBatchItem(payload.id, { status: 'error', error: '缺少姓名或職位', expanded: true });
+      return null;
+    }
+
+    const itemId = payload.id;
+    const params = letterParams(payload);
     try {
-      await generateStream(params, (chunk) => {
-        acc += chunk;
-        setBatch((b) => ({
-          ...b,
-          items: b.items.map((it) => (it.id === itemId ? { ...it, result: acc } : it)),
-        }));
+      const text = generateLetterLocal(params);
+      if (!text?.trim()) {
+        throw new Error('信件內容為空');
+      }
+      // 一次更新為完成，避免「生成中」狀態卡住
+      patchBatchItem(itemId, {
+        status: 'done',
+        result: text,
+        error: '',
+        expanded: true,
+        reason,
       });
-      setBatch((b) => ({
-        ...b,
-        items: b.items.map((it) => (it.id === itemId ? { ...it, status: 'done' } : it)),
-      }));
+      return { ...payload, status: 'done', result: text };
     } catch (e) {
-      setBatch((b) => ({
-        ...b,
-        items: b.items.map((it) =>
-          it.id === itemId ? { ...it, status: 'error', error: e.message || '生成失敗' } : it
-        ),
-      }));
+      const errMsg = e.message || '生成失敗';
+      patchBatchItem(itemId, { status: 'error', error: errMsg });
+      return null;
     }
   };
 
-  const startBatch = async () => {
-    let list = batch.items;
-    if (!list.length) {
-      if (!batch.csvText.trim()) {
-        showToast('請先匯入 CSV 名單', 'error');
-        return;
-      }
+  const runBatchGeneration = async (listOverride) => {
+    let list = listOverride ?? getActiveBatchItems();
+
+    if (!list.length && batch.csvText.trim()) {
       const parsed = parseCsvContent(batch.csvText, defaultBatchReason);
-      if (!parsed.length) {
-        showToast('無法解析名單', 'error');
-        return;
+      if (parsed.length) {
+        list = applyParsedRows(parsed);
       }
-      const enriched = enrichRowsWithReason(parsed);
-      const newItems = enriched.map(newBatchItem);
-      setCsvPreview(enriched);
-      setBatch((b) => ({ ...b, items: newItems, processed: 0 }));
-      list = newItems;
     }
 
-    setBatch((b) => ({ ...b, isProcessing: true, processed: 0 }));
-
-    for (let i = 0; i < list.length; i++) {
-      const item = list[i];
-      if (!item.name.trim() || !item.position.trim()) continue;
-      await processItem(item.id);
-      setBatch((b) => ({ ...b, processed: i + 1 }));
-      await delay(500);
+    if (!list.length) {
+      showToast('請先匯入名單（貼上 CSV 或選擇檔案）', 'error');
+      return;
     }
 
-    setBatch((b) => ({ ...b, isProcessing: false }));
-    showToast(`批量生成完成`);
+    batchItemsRef.current = [...list];
+    setBatch((b) => ({ ...b, isProcessing: true, processed: 0, items: [...list] }));
+
+    const generated = [];
+    try {
+      for (let i = 0; i < list.length; i++) {
+        setBatch((b) => ({ ...b, processed: i }));
+        const latest = batchItemsRef.current.find((it) => it.id === list[i].id) || list[i];
+        const done = await processItem(latest);
+        if (done) generated.push(done);
+        setBatch((b) => ({ ...b, processed: i + 1 }));
+        await delay(80);
+      }
+    } finally {
+      setBatch((b) => ({ ...b, isProcessing: false }));
+    }
+
+    if (!generated.length) {
+      showToast('沒有成功生成，請檢查姓名、職位欄位是否正確', 'error');
+      return;
+    }
+
+    showToast(`感謝信已生成 ${generated.length} / ${list.length} 封，請在右側過目`);
 
     if (email.autoSendAfterBatch) {
-      await sendBatchEmails();
+      if (!isDirectSendReady(email)) {
+        showToast('已生成完成。請在寄信設定選擇「Google 試算表」或 EmailJS 並完成設定', 'error');
+        return;
+      }
+      const sendable = generated.filter((i) => i.email?.trim() && i.result);
+      if (sendable.length) {
+        showToast(`即將自動寄出 ${sendable.length} 封，請確認內容`);
+        await sendBatchEmails(sendable);
+      } else {
+        showToast('已生成完成。CSV 需含 Email 欄才能自動寄送', 'error');
+      }
     }
   };
+
+  const startBatch = () => runBatchGeneration();
+
+  const directSendEnabled = isDirectSendReady(email);
+  const useGmailCompose = (email.sendMethod || SEND_METHODS.gmail) === SEND_METHODS.gmail;
 
   const sendItemEmail = async (item, silent = false) => {
     if (!item.email) {
@@ -318,21 +388,39 @@ export default function App() {
       if (!silent) showToast('請先生成信件', 'error');
       return false;
     }
-    const opened = openGmailCompose(item, email, company);
-    if (!opened) {
-      if (!silent) showToast('無法開啟 Gmail，請允許瀏覽器彈出視窗', 'error');
+
+    const needConfirm = !useGmailCompose;
+    if (
+      needConfirm &&
+      !silent &&
+      !confirm(`確定寄送給 ${item.name}（${item.email}）？\n\n請確認您已在 App 內過目信件內容。`)
+    ) {
       return false;
     }
-    if (item.id !== 'single') {
-      setBatch((b) => ({
-        ...b,
-        items: b.items.map((it) =>
-          it.id === item.id ? { ...it, emailStatus: 'sent', emailError: '' } : it
-        ),
-      }));
+
+    if (useGmailCompose && !silent && !confirm(`開啟 Gmail 寄給 ${item.name}？\n\n請在 Gmail 按「傳送」。`)) {
+      return false;
     }
-    if (!silent) showToast(`已開啟 Gmail：${item.name}，請確認後按傳送`);
-    return true;
+
+    try {
+      const outcome = await sendEmail(item, email, company);
+      if (item.id !== 'single') {
+        patchBatchItem(item.id, { emailStatus: 'sent', emailError: '' });
+      }
+      if (!silent) {
+        showToast(
+          outcome.mode === 'gmail' ? `已開啟 Gmail：${item.name}，請按傳送` : `已寄出：${item.name}`
+        );
+      }
+      return true;
+    } catch (e) {
+      const errMsg = e.message || '寄信失敗';
+      if (item.id !== 'single') {
+        patchBatchItem(item.id, { emailStatus: 'failed', emailError: errMsg });
+      }
+      if (!silent) showToast(errMsg, 'error');
+      return false;
+    }
   };
 
   const sendSingleEmail = () => {
@@ -342,18 +430,69 @@ export default function App() {
     );
   };
 
-  const sendBatchEmails = async () => {
-    const items = batch.items.filter((i) => i.status === 'done' && i.email && i.result);
+  const sendBatchEmails = async (itemsOverride) => {
+    const source = itemsOverride ?? getActiveBatchItems();
+    const items = source.filter((i) => {
+      const ready = itemsOverride ? i.result : i.status === 'done' && i.result;
+      return ready && i.email?.trim();
+    });
     if (!items.length) {
-      showToast('沒有可寄送項目', 'error');
+      const doneNoEmail = source.filter((i) => i.status === 'done' && i.result && !i.email?.trim()).length;
+      if (doneNoEmail > 0) {
+        showToast(`已有 ${doneNoEmail} 封生成完成，但 CSV 無 Email，無法寄送`, 'error');
+      } else {
+        showToast('請先按「開始批量生成」完成信件，且 CSV 需含 Email 欄', 'error');
+      }
       return;
     }
-    if (
-      !confirm(
-        `將依序開啟 ${items.length} 個 Gmail 撰寫視窗，請確認內容後分別按「傳送」。\n\n請允許瀏覽器彈出視窗，是否繼續？`
-      )
-    )
+
+    if (useGmailCompose) {
+      if (
+        !confirm(
+          `將一次開啟 ${items.length} 個 Gmail 撰寫視窗，請在每個視窗按「傳送」。\n\n請在瀏覽器允許此網站的「彈出式視窗」，是否繼續？`
+        )
+      ) {
+        return;
+      }
+
+      setBatch((b) => ({ ...b, isSendingEmail: true }));
+      setEmailSendDone(0);
+      setEmailSendTotal(items.length);
+
+      let ok = 0;
+      // 必須在單次點擊內同步開啟所有視窗；await 之後瀏覽器會擋後續 popup
+      for (let i = 0; i < items.length; i++) {
+        const item = items[i];
+        const opened = openGmailCompose(item, email, company);
+        if (opened) {
+          ok++;
+          patchBatchItem(item.id, { emailStatus: 'sent', emailError: '' });
+        } else {
+          patchBatchItem(item.id, {
+            emailStatus: 'failed',
+            emailError: '無法開啟 Gmail（請允許彈出式視窗）',
+          });
+        }
+        setEmailSendDone(i + 1);
+      }
+
+      setBatch((b) => ({ ...b, isSendingEmail: false }));
+      if (ok === items.length) {
+        showToast(`已開啟 ${ok} 個 Gmail 視窗，請在各視窗按傳送`);
+      } else if (ok > 0) {
+        showToast(
+          `已開啟 ${ok} / ${items.length} 個視窗。其餘被瀏覽器擋下，請允許彈出視窗後對失敗項目按「Gmail」重試`,
+          'error'
+        );
+      } else {
+        showToast('無法開啟 Gmail。請在網址列允許此網站彈出式視窗後再試', 'error');
+      }
       return;
+    }
+
+    if (!confirm(`確定自動寄送 ${items.length} 封？\n\n請確認每封信已在 App 內過目。`)) {
+      return;
+    }
 
     setBatch((b) => ({ ...b, isSendingEmail: true }));
     setEmailSendDone(0);
@@ -365,7 +504,7 @@ export default function App() {
       await delay(800);
     }
     setBatch((b) => ({ ...b, isSendingEmail: false }));
-    showToast(`Gmail 已開啟 ${ok} 封，${items.length - ok} 封失敗（可能被瀏覽器阻擋彈出視窗）`);
+    showToast(`寄送完成：${ok} 成功，${items.length - ok} 失敗`);
   };
 
   return (
@@ -384,7 +523,22 @@ export default function App() {
 
         <div className="settings-row">
           <LetterSettings company={company} setCompany={setCompany} tone={tone} setTone={setTone} lang={lang} setLang={setLang} />
-          <EmailSettings email={email} onChange={updateEmail} />
+          <EmailSettings
+            email={email}
+            onChange={updateEmail}
+            onTestSend={async () => {
+              try {
+                const r = await sendTestEmail(email, company);
+                showToast(
+                  r.mode === 'gmail'
+                    ? '已開啟 Gmail 測試信，請按傳送'
+                    : `測試信已寄至 ${email.gmail}`
+                );
+              } catch (e) {
+                showToast(e.message || '測試寄信失敗', 'error');
+              }
+            }}
+          />
         </div>
 
         <div className="main-tabs">
@@ -402,6 +556,7 @@ export default function App() {
             onCopy={copyText}
             onSendEmail={sendSingleEmail}
             isSendingEmail={batch.isSendingEmail}
+            directSendEnabled={directSendEnabled}
           />
         ) : (
           <BatchMode
@@ -420,19 +575,32 @@ export default function App() {
             onItemResumeChange={updateItemResume}
             tone={tone}
             onParseCsv={parseCsv}
-            onCsvFile={(e) => {
+            onParseCsvAndGenerate={parseCsvAndGenerate}
+            onCsvFile={async (e) => {
               const file = e.target.files?.[0];
               if (!file) return;
-              const reader = new FileReader();
-              reader.onload = (ev) => {
-                setBatch((b) => ({ ...b, csvText: ev.target.result, fileName: file.name }));
-                setTimeout(parseCsv, 0);
-              };
-              reader.readAsText(file, 'UTF-8');
+              try {
+                const { importSpreadsheetFile, applicantsToCsvPreview } = await import(
+                  './utils/spreadsheetImport.js'
+                );
+                const parsed = await importSpreadsheetFile(file, defaultBatchReason);
+                if (!parsed.length) {
+                  showToast('無法解析名單，請確認第一列為姓名、職位（或含標題列）', 'error');
+                  return;
+                }
+                const previewText =
+                  /\.(csv|txt|tsv)$/i.test(file.name) ? await file.text() : applicantsToCsvPreview(parsed);
+                setBatch((b) => ({ ...b, csvText: previewText, fileName: file.name }));
+                applyParsedRows(parsed);
+                showToast(`已載入 ${parsed.length} 位（${file.name}）。請按「開始批量生成」`);
+              } catch (err) {
+                showToast(err.message || '檔案讀取失敗', 'error');
+              }
               e.target.value = '';
             }}
             onClearBatch={() => {
               if (batch.isProcessing) return;
+              batchItemsRef.current = [];
               setBatch({ items: [], csvText: '', fileName: '', isProcessing: false, isSendingEmail: false, processed: 0 });
               setCsvPreview([]);
               showToast('已清除名單');
@@ -442,7 +610,7 @@ export default function App() {
               const failed = batch.items.filter((i) => i.status === 'error');
               setBatch((b) => ({ ...b, isProcessing: true }));
               for (const item of failed) {
-                await processItem(item.id);
+                await processItem(item);
                 await delay(500);
               }
               setBatch((b) => ({ ...b, isProcessing: false }));
@@ -467,15 +635,12 @@ export default function App() {
               downloadMailMergeCsv(done, email, company);
               showToast('已下載郵件合併 CSV');
             }}
-            onRetryItem={(item) => processItem(item.id)}
+            onRetryItem={(item) => processItem(item)}
             onCopy={copyText}
             onSendItemEmail={(item) => sendItemEmail(item, false)}
             onToggle={(item) => {
-              if (item.status === 'done' || item.status === 'error') {
-                setBatch((b) => ({
-                  ...b,
-                  items: b.items.map((it) => (it.id === item.id ? { ...it, expanded: !it.expanded } : it)),
-                }));
+              if (item.status === 'done' || item.status === 'error' || item.status === 'processing') {
+                patchBatchItem(item.id, { expanded: !item.expanded });
               }
             }}
             batchDoneCount={batchDoneCount}
@@ -485,6 +650,7 @@ export default function App() {
             emailSendTotal={emailSendTotal}
             emailSendPercent={emailSendPercent}
             sendableCount={sendableCount}
+            directSendEnabled={directSendEnabled}
           />
         )}
       </div>

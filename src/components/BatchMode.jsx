@@ -1,5 +1,6 @@
 import { useRef, useMemo } from 'react';
 import { REASONS } from '../constants';
+import { SPREADSHEET_ACCEPT, NUMBERS_FILE_ACCEPT } from '../constants/spreadsheetAccept';
 import BatchItem from './BatchItem';
 import ProgressBar from './ProgressBar';
 import HumanReviewNotice from './HumanReviewNotice';
@@ -17,6 +18,7 @@ export default function BatchMode({
   onItemResumeChange,
   tone,
   onParseCsv,
+  onParseCsvAndGenerate,
   onCsvFile,
   onClearBatch,
   onStartBatch,
@@ -36,12 +38,14 @@ export default function BatchMode({
   emailSendTotal,
   emailSendPercent,
   sendableCount,
+  directSendEnabled,
 }) {
   const fileInputRef = useRef(null);
+  const numbersFileInputRef = useRef(null);
+  const anyFileInputRef = useRef(null);
   const batchErrorCount = batch.items.filter((i) => i.status === 'error').length;
   const csvPreviewLimited = useMemo(() => csvPreview.slice(0, 20), [csvPreview]);
   const csvPreviewMore = Math.max(0, csvPreview.length - 20);
-  const hasActiveItems = batch.items.some((i) => i.status !== 'idle');
 
   return (
     <div className="batch-layout">
@@ -49,17 +53,48 @@ export default function BatchMode({
         <div className="card">
           <div className="card-title">匯入應徵者名單</div>
           <p className="csv-hint">
-            支援 <strong>CSV 檔案上傳</strong>或<strong>貼上內容</strong>，每行一筆。
+            支援上傳 <strong>CSV</strong>、<strong>Excel（.xlsx）</strong>、<strong>Numbers（.numbers）</strong>，或直接<strong>貼上內容</strong>。
             <br />
             最簡格式：<code>姓名,職位</code> 或 <code>姓名,職位,Email</code>（<strong>不必填婉拒原因</strong>，系統自動套用）
             <br />
-            進階：可加 <code>履歷</code> 或 <code>履歷摘要</code> 欄（個人化感謝信）、<code>備註</code> 欄（自動判斷原因）
+            請按 <strong>「Numbers 檔」</strong> 按鈕選取 .numbers；若仍看不到，按 <strong>「所有檔案…」</strong>
+            <br />
+            進階：可加 <code>履歷</code>、<code>備註</code> 欄
           </p>
 
           <div className="csv-upload-row">
-            <input ref={fileInputRef} type="file" accept=".csv,.txt" hidden onChange={onCsvFile} />
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept={SPREADSHEET_ACCEPT}
+              hidden
+              onChange={onCsvFile}
+            />
+            <input
+              ref={numbersFileInputRef}
+              type="file"
+              accept={NUMBERS_FILE_ACCEPT}
+              hidden
+              onChange={onCsvFile}
+            />
             <button type="button" className="btn btn-secondary btn-sm" onClick={() => fileInputRef.current?.click()}>
-              📂 選擇 CSV 檔案
+              📂 CSV / Excel
+            </button>
+            <button
+              type="button"
+              className="btn btn-secondary btn-sm"
+              onClick={() => numbersFileInputRef.current?.click()}
+            >
+              📊 Numbers 檔
+            </button>
+            <input ref={anyFileInputRef} type="file" hidden onChange={onCsvFile} />
+            <button
+              type="button"
+              className="btn btn-secondary btn-sm"
+              title="顯示所有檔案類型（含 .numbers）"
+              onClick={() => anyFileInputRef.current?.click()}
+            >
+              所有檔案…
             </button>
             {batch.fileName && <span className="csv-filename">{batch.fileName}</span>}
           </div>
@@ -108,8 +143,8 @@ export default function BatchMode({
           </div>
 
           <div className="btn-row">
-            <button type="button" className="btn btn-primary btn-sm" onClick={onParseCsv}>
-              解析並載入名單
+            <button type="button" className="btn btn-secondary btn-sm" onClick={onParseCsv}>
+              ① 僅載入名單
             </button>
             {batch.items.length > 0 && (
               <button
@@ -124,8 +159,10 @@ export default function BatchMode({
           </div>
 
           {batch.items.length > 0 && (
-            <div className="csv-summary">
-              已載入 <strong>{batch.items.length}</strong> 位應徵者，可開始批量生成
+            <div className="csv-summary csv-summary-warn">
+              已載入 <strong>{batch.items.length}</strong> 位。
+              <br />
+              <strong>「僅載入名單」不會生成信件</strong>，請按「② 開始批量生成」或「載入並生成感謝信」
             </div>
           )}
 
@@ -162,20 +199,39 @@ export default function BatchMode({
           )}
         </div>
 
-        <div className="btn-row" style={{ marginBottom: 16 }}>
+        <div className="btn-row batch-generate-row">
+          <button
+            type="button"
+            className="btn btn-gold"
+            disabled={batch.isProcessing || !batch.csvText.trim()}
+            onClick={onParseCsvAndGenerate}
+          >
+            {batch.isProcessing ? '生成中...' : '⚡ 載入並生成感謝信'}
+          </button>
           <button
             type="button"
             className="btn btn-primary"
             disabled={batch.isProcessing || !batch.items.length}
             onClick={onStartBatch}
           >
-            {batch.isProcessing ? '生成中...' : '⚡ 開始批量生成'}
+            {batch.isProcessing ? '生成中...' : '② 開始批量生成'}
             {batch.items.length > 0 && !batch.isProcessing && `（${batch.items.length} 筆）`}
           </button>
         </div>
 
         {(batch.isProcessing || batch.processed > 0) && (
-          <ProgressBar label="生成進度" done={batchDoneCount} total={batchTotalCount} percent={progressPercent} />
+          <ProgressBar
+            label="生成進度"
+            done={batch.isProcessing ? Math.max(batch.processed, batchDoneCount) : batchDoneCount}
+            total={batchTotalCount}
+            percent={
+              batchTotalCount
+                ? Math.round(
+                    (Math.max(batch.isProcessing ? batch.processed : 0, batchDoneCount) / batchTotalCount) * 100
+                  )
+                : 0
+            }
+          />
         )}
 
         {batch.isSendingEmail && (
@@ -189,7 +245,12 @@ export default function BatchMode({
       </div>
 
       <div className="batch-main">
-        {hasActiveItems &&
+        {batch.items.length > 0 && batchDoneCount === 0 && !batch.isProcessing && (
+          <div className="batch-main-cta">
+            名單已載入，請按左側 <strong>「② 開始批量生成」</strong> 或 <strong>「載入並生成感謝信」</strong>
+          </div>
+        )}
+        {batch.items.length > 0 &&
           batch.items.map((item, idx) => (
             <BatchItem
               key={item.id}
@@ -199,6 +260,7 @@ export default function BatchMode({
               onToggle={onToggle}
               onCopy={onCopy}
               onSend={onSendItemEmail}
+              directSendEnabled={directSendEnabled}
               onRetry={onRetryItem}
               onReasonChange={onItemReasonChange}
               onResumeChange={onItemResumeChange}
@@ -216,7 +278,13 @@ export default function BatchMode({
               onClick={onSendBatchEmails}
               disabled={batch.isSendingEmail || !sendableCount}
             >
-              {batch.isSendingEmail ? '開啟 Gmail 中...' : '📧 用 Gmail 批量寄送'}
+              {batch.isSendingEmail
+                ? directSendEnabled
+                  ? '寄送中...'
+                  : '開啟 Gmail 中...'
+                : directSendEnabled
+                  ? '📧 確認並批量直接寄出'
+                  : '📧 用 Gmail 批量寄送'}
               {sendableCount > 0 && !batch.isSendingEmail && `（${sendableCount} 封）`}
             </button>
             <button type="button" className="btn btn-secondary" onClick={onDownloadMailMerge}>

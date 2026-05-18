@@ -8,13 +8,17 @@ export default function BatchItem({
   onToggle,
   onCopy,
   onSend,
+  directSendEnabled,
   onRetry,
   onReasonChange,
   onResumeChange,
   tone = '專業有禮',
 }) {
   const showBody =
-    item.expanded && (item.status === 'done' || item.status === 'processing' || item.status === 'error');
+    item.expanded ||
+    item.status === 'processing' ||
+    item.status === 'done' ||
+    item.status === 'error';
   const canEditReason = item.status === 'idle' || item.status === 'done' || item.status === 'error';
 
   return (
@@ -72,9 +76,12 @@ export default function BatchItem({
               <ResumeHighlightPreview resume={item.resume} position={item.position} tone={tone} />
             </div>
           )}
+          {item.status === 'idle' && (
+            <p className="batch-idle-hint">尚未生成感謝信，請按左側「② 開始批量生成」</p>
+          )}
           {(item.status === 'done' || item.status === 'processing') && (
             <div className={`batch-result ${item.status === 'processing' ? 'cursor-blink' : ''}`}>
-              {item.result}
+              {item.result || (item.status === 'processing' ? '正在生成…' : '')}
             </div>
           )}
           {item.status === 'error' && <div className="batch-error-msg">{item.error}</div>}
@@ -101,11 +108,18 @@ export default function BatchItem({
                       onSend(item);
                     }}
                   >
-                    📧 Gmail
+                    {directSendEnabled ? '📧 寄出' : '📧 Gmail'}
                   </button>
                 )}
-                {item.emailStatus === 'sent' && <span className="status-email-sent">✉ 已開啟 Gmail</span>}
-                {item.emailStatus === 'failed' && <span className="status-email-fail">✉ 寄信失敗</span>}
+                {item.emailStatus === 'sent' && (
+                  <span className="status-email-sent">{directSendEnabled ? '✉ 已寄出' : '✉ 已開啟 Gmail'}</span>
+                )}
+                {item.emailStatus === 'failed' && (
+                  <span className="status-email-fail" title={item.emailError || ''}>
+                    ✉ 寄信失敗
+                    {item.emailError ? `：${item.emailError}` : ''}
+                  </span>
+                )}
               </>
             )}
             {item.status === 'error' && (

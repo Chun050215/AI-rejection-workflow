@@ -13,6 +13,7 @@ export default function SingleMode({
   onCopy,
   onSendEmail,
   isSendingEmail,
+  directSendEnabled,
 }) {
   const cjkCount = single.result ? countCjkChars(single.result) : 0;
   const overLimit = cjkCount > LETTER_MAX_CJK;
@@ -171,7 +172,7 @@ export default function SingleMode({
                     📋 複製信件
                   </button>
                   <button type="button" className="btn btn-primary" disabled={isSendingEmail} onClick={onSendEmail}>
-                    📧 用 Gmail 寄送
+                    {directSendEnabled ? '📧 確認並直接寄出' : '📧 用 Gmail 寄送'}
                   </button>
                 </div>
               </>

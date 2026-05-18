@@ -1,8 +1,13 @@
+import { useRef } from 'react';
 import { REASONS, SCENARIOS, LETTER_MAX_CJK } from '../constants';
+import { RESUME_FILE_ACCEPT } from '../constants/resumeFileAccept';
 import { countCjkChars } from '../utils/words';
 import { buildPersonalTouchZh } from '../utils/personalize';
 import HumanReviewNotice from './HumanReviewNotice';
 import ResumeHighlightPreview from './ResumeHighlightPreview';
+import { formatJdMatchSummary } from '../utils/jdMatcher';
+import JobDescriptionEditor from './JobDescriptionEditor';
+import { getJdText } from '../utils/jdStore';
 
 export default function SingleMode({
   single,
@@ -14,7 +19,18 @@ export default function SingleMode({
   onSendEmail,
   isSendingEmail,
   directSendEnabled,
+  jobDescriptions = {},
+  activeJdPosition = '',
+  onActiveJdPositionChange,
+  onJdTextChange,
+  onImportPositionsFromList,
+  onEnsurePositionSlot,
+  onResumeFile,
 }) {
+  const resumeInputRef = useRef(null);
+  const jdLines = formatJdMatchSummary(single.jdMatch);
+  const hasJd = !!getJdText(jobDescriptions, single.position, single.jdKey);
+  const hasAutoReason = !!(single.reasonDetail || '').trim();
   const cjkCount = single.result ? countCjkChars(single.result) : 0;
   const overLimit = cjkCount > LETTER_MAX_CJK;
   const resumeText = (single.resume || '').trim();
@@ -42,6 +58,7 @@ export default function SingleMode({
                 name: s.name,
                 position: s.position,
                 reason: s.reason,
+                reasonDetail: '',
                 resume: s.resume || '',
                 result: '',
                 lastGeneratedResume: '',
@@ -74,7 +91,11 @@ export default function SingleMode({
                 <input
                   type="text"
                   value={single.position}
-                  onChange={(e) => setSingle((prev) => ({ ...prev, position: e.target.value }))}
+                  onChange={(e) => {
+                    const position = e.target.value;
+                    setSingle((prev) => ({ ...prev, position }));
+                    onEnsurePositionSlot?.(position);
+                  }}
                   placeholder="例：行銷企劃專員"
                 />
               </div>
@@ -100,22 +121,66 @@ export default function SingleMode({
             </div>
           </section>
 
-          <div className="flow-connector" aria-hidden="true">
-            <span className="flow-connector-line" />
-            <span className="flow-connector-label">↓ 以下履歷將寫入感謝信</span>
-            <span className="flow-connector-line" />
-          </div>
+          <section className="flow-section">
+            <h4 className="flow-section-title">職缺說明 JD（依職位）</h4>
+            <JobDescriptionEditor
+              jobDescriptions={jobDescriptions}
+              activePosition={activeJdPosition || single.position}
+              onActivePositionChange={onActiveJdPositionChange}
+              onJdTextChange={onJdTextChange}
+              positionSuggestions={single.position ? [single.position] : []}
+              onImportFromList={onImportPositionsFromList}
+              compact
+            />
+            {jdLines.length > 0 && (
+              <div className="jd-match-preview" style={{ marginTop: 10 }}>
+                <strong>JD 比對摘要</strong>
+                <ul>
+                  {jdLines.map((line) => (
+                    <li key={line}>{line}</li>
+                  ))}
+                </ul>
+              </div>
+            )}
+          </section>
 
           <section className="flow-section flow-section-resume">
-            <h4 className="flow-section-title">① 應徵者履歷</h4>
-            <textarea
-              className="resume-input-linked"
-              value={single.resume}
-              onChange={(e) => setSingle((prev) => ({ ...prev, resume: e.target.value }))}
-              placeholder="例：5年行銷經驗，曾任職於 OO 股份有限公司。擅長品牌企劃、數據分析與專案管理…"
-              rows={5}
+            <h4 className="flow-section-title">① 上傳履歷檔（自動比對 JD）</h4>
+            <p className="csv-hint" style={{ marginBottom: 8 }}>
+              支援 PDF、Word、TXT。上傳後會依 JD 自動產生個別未錄取理由（無需手填）。
+            </p>
+            <input
+              ref={resumeInputRef}
+              type="file"
+              accept={RESUME_FILE_ACCEPT}
+              hidden
+              onChange={(e) => {
+                const file = e.target.files?.[0];
+                if (file && onResumeFile) onResumeFile(file);
+                e.target.value = '';
+              }}
             />
-            <ResumeHighlightPreview resume={single.resume} position={single.position} tone={tone} />
+            <button
+              type="button"
+              className="btn btn-secondary btn-sm"
+              disabled={!onResumeFile}
+              onClick={() => resumeInputRef.current?.click()}
+            >
+              📎 {single.resumeFileName ? `已載入：${single.resumeFileName}` : '選擇履歷檔'}
+            </button>
+            {!hasJd && single.position && (
+              <p className="csv-preview-note warn">請先為「{single.position}」貼上 JD（上傳履歷後才會比對）</p>
+            )}
+            {!single.position && <p className="csv-preview-note warn">請先填寫應徵職位</p>}
+            {hasAutoReason && (
+              <div className="reason-auto-block" style={{ marginTop: 12 }}>
+                <span className="reason-auto-label">自動產生的個別理由（與類別一併寫入信件）</span>
+                <p className="reason-auto-text">{single.reasonDetail}</p>
+              </div>
+            )}
+            {single.resume && (
+              <ResumeHighlightPreview resume={single.resume} position={single.position} tone={tone} />
+            )}
           </section>
 
           <div className="flow-connector" aria-hidden="true">
@@ -127,7 +192,7 @@ export default function SingleMode({
           <section className="flow-section">
             <div className="btn-row">
               <button type="button" className="btn btn-primary" disabled={single.streaming} onClick={onGenerate}>
-                {single.streaming ? '生成中...' : '② 依上方履歷生成感謝信'}
+                {single.streaming ? '生成中...' : '② 生成感謝信'}
               </button>
             </div>
 

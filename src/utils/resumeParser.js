@@ -1,5 +1,5 @@
-/** 常見技能關鍵字（用於從履歷擷取亮點） */
-const SKILL_KEYWORDS = [
+/** 常見技能關鍵字（用於從履歷擷取亮點、JD 比對） */
+export const SKILL_KEYWORDS = [
   '行銷', '品牌', '數據分析', '專案管理', '產品', 'UX', 'UI', '設計',
   'Python', 'Java', 'JavaScript', 'React', 'SQL', 'Excel', 'Power BI',
   '溝通', '簡報', '領導', '跨部門', '敏捷', 'Scrum', 'AI', '機器學習',

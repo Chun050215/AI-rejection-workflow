@@ -409,11 +409,118 @@
       white-space: nowrap;
       vertical-align: middle;
     }
-    .batch-reason-row { margin-bottom: 12px; }
-    .batch-reason-row label { margin-bottom: 4px; }
-    .batch-reason-row select { font-size: 0.82rem; }
+    .batch-reason-block {
+      margin-bottom: 12px;
+      padding: 10px 12px;
+      background: var(--surface2);
+      border-radius: 10px;
+      border: 1px solid var(--border);
+    }
+    .batch-reason-row { margin-bottom: 10px; }
+    .batch-reason-row:last-child { margin-bottom: 0; }
+    .batch-reason-row label { margin-bottom: 4px; display: block; font-size: 0.82rem; }
+    .batch-reason-row select,
+    .batch-reason-row textarea {
+      width: 100%;
+      font-size: 0.82rem;
+    }
+    .batch-reason-detail-row textarea {
+      font-family: inherit;
+      line-height: 1.5;
+      resize: vertical;
+    }
+    .batch-reason-hint {
+      margin: 6px 0 0;
+      font-size: 0.75rem;
+      color: var(--text-muted);
+    }
+    .batch-item-reason-custom {
+      background: rgba(0, 60, 126, 0.12);
+      border-color: var(--primary);
+    }
+    .jd-block {
+      margin-top: 14px;
+      padding: 12px;
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+    }
+    .jd-block label { display: block; font-weight: 600; font-size: 0.88rem; }
+    .jd-match-preview {
+      margin-top: 8px;
+      padding: 8px 10px;
+      background: rgba(0, 60, 126, 0.06);
+      border-left: 3px solid var(--primary);
+      border-radius: 6px;
+      font-size: 0.78rem;
+    }
+    .jd-match-preview ul {
+      margin: 6px 0 0;
+      padding-left: 1.1rem;
+      line-height: 1.5;
+    }
+    .jd-editor-toolbar {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 8px;
+    }
+    .jd-editor-toolbar label { font-size: 0.78rem; font-weight: 600; margin: 0; }
+    .jd-editor-toolbar select { flex: 1; min-width: 140px; }
+    .jd-editor-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin-top: 8px;
+      align-items: center;
+    }
+    .jd-editor-actions input {
+      flex: 1;
+      min-width: 120px;
+      font-size: 0.8rem;
+      padding: 6px 8px;
+    }
+    .jd-editor-status {
+      margin: 8px 0 0;
+      font-size: 0.72rem;
+      color: var(--text-muted);
+      line-height: 1.45;
+    }
+    .batch-jd-key-row {
+      margin-bottom: 10px;
+    }
+    .batch-jd-key-row label {
+      display: block;
+      font-size: 0.78rem;
+      font-weight: 600;
+      margin-bottom: 4px;
+    }
+    .batch-jd-key-row select { width: 100%; max-width: 280px; }
     .batch-resume-row { margin-bottom: 12px; }
     .batch-resume-row label { margin-bottom: 4px; }
+    .batch-resume-upload-row { margin-bottom: 12px; }
+    .batch-resume-upload-row label { display: block; margin-bottom: 6px; font-weight: 600; font-size: 0.82rem; }
+    .reason-auto-block {
+      margin-top: 10px;
+      padding: 10px 12px;
+      background: rgba(0, 60, 126, 0.06);
+      border-left: 3px solid var(--primary);
+      border-radius: 6px;
+    }
+    .reason-auto-label {
+      display: block;
+      font-size: 0.72rem;
+      font-weight: 600;
+      color: var(--primary);
+      margin-bottom: 4px;
+    }
+    .reason-auto-text {
+      margin: 0;
+      font-size: 0.8rem;
+      line-height: 1.55;
+      color: var(--text);
+    }
+    .csv-preview-note.warn { color: var(--warn, #b45309); font-size: 0.78rem; margin-top: 8px; }
     .batch-item-resume-badge {
       margin-left: 6px;
       font-size: 0.65rem;

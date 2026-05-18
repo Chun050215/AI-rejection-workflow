@@ -13,6 +13,16 @@ import { delay } from './utils/delay';
 import { countWords } from './utils/words';
 import { parseCsvContent } from './utils/csv';
 import { resolveReason } from './utils/reasonMatcher';
+import { analyzeResumeAgainstJd } from './utils/jdMatcher';
+import {
+  loadBatchJdState,
+  getJdText,
+  hasAnyJdContent,
+  collectPositions,
+  mergePositionSlots,
+  resolveJdKey,
+} from './utils/jdStore';
+import { extractTextFromResumeFile, matchResumeFileToApplicant } from './utils/resumeFileImport';
 import { generateLetterLocal, streamText, buildPrompt } from './utils/letter';
 import {
   loadEmailSettings,
@@ -30,6 +40,10 @@ const newBatchItem = (row) => ({
   position: row.position,
   email: row.email || '',
   reason: row.reason,
+  reasonDetail: row.reasonDetail || '',
+  resumeFileName: row.resumeFileName || '',
+  jdMatch: null,
+  jdKey: row.jdKey || '',
   note: row.note || '',
   resume: row.resume || '',
   status: 'idle',
@@ -64,6 +78,7 @@ export default function App() {
     position: '',
     email: '',
     reason: REASONS[0],
+    reasonDetail: '',
     resume: '',
     lastGeneratedResume: '',
     result: '',
@@ -72,10 +87,14 @@ export default function App() {
     wordCount: 0,
   });
 
+  const initialJd = loadBatchJdState();
+
   const [batch, setBatch] = useState({
     items: [],
     csvText: '',
     fileName: '',
+    jobDescriptions: initialJd.jobDescriptions,
+    activeJdPosition: initialJd.activeJdPosition,
     isProcessing: false,
     isSendingEmail: false,
     processed: 0,
@@ -133,6 +152,7 @@ export default function App() {
       name: item.name,
       position: item.position,
       reason: item.reason?.trim() || defaultBatchReason,
+      reasonDetail: (item.reasonDetail || '').trim(),
       company,
       tone,
       lang,
@@ -147,12 +167,13 @@ export default function App() {
         name: single.name || '（姓名）',
         position: single.position || '（職位）',
         reason: single.reason,
+        reasonDetail: single.reasonDetail,
         company,
         tone,
         lang,
         resume: single.resume,
       }),
-    [single.name, single.position, single.reason, single.resume, company, tone, lang]
+    [single.name, single.position, single.reason, single.reasonDetail, single.resume, company, tone, lang]
   );
 
   const batchDoneCount = batch.items.filter((i) => i.status === 'done').length;
@@ -190,7 +211,8 @@ export default function App() {
       return;
     }
     if (!(single.resume || '').trim()) {
-      showToast('建議填寫①應徵者履歷，才能產生個人化感謝信', 'error');
+      showToast('請先上傳履歷檔（①），系統才能產生個人化感謝信', 'error');
+      return;
     }
     const start = Date.now();
     const params = letterParams(single);
@@ -218,30 +240,326 @@ export default function App() {
     (parsed) =>
       parsed.map((row) => ({
         ...row,
+        reasonDetail: (row.reasonDetail || '').trim(),
         reason: resolveReason(row, defaultBatchReason, autoDetectReason),
       })),
     [defaultBatchReason, autoDetectReason]
   );
 
-  const persistBatchSettings = useCallback((nextAutoDetect) => {
+  const persistBatchSettings = useCallback((patch) => {
     try {
       const s = JSON.parse(localStorage.getItem('batchSettings') || '{}');
-      localStorage.setItem('batchSettings', JSON.stringify({ ...s, autoDetectReason: nextAutoDetect }));
+      localStorage.setItem('batchSettings', JSON.stringify({ ...s, ...patch }));
     } catch {
       /* ignore */
     }
   }, []);
 
+  const applyJdAnalysisToItem = useCallback((item, jobDescriptions) => {
+    const jd = getJdText(jobDescriptions, item.position, item.jdKey);
+    if (!jd || !item.resume?.trim()) return item;
+    const analysis = analyzeResumeAgainstJd(item.resume, jd, item.position);
+    const jdKey = resolveJdKey(item.position, jobDescriptions, item.jdKey);
+    return {
+      ...item,
+      jdKey,
+      reason: analysis.suggestedReason || item.reason,
+      reasonDetail: analysis.reasonDetail,
+      jdMatch: analysis.matchSummary,
+      expanded: true,
+    };
+  }, []);
+
+  const autoAnalyzeItemsWithJd = useCallback(
+    (items, jobDescriptions) => {
+      if (!hasAnyJdContent(jobDescriptions)) return items;
+      return items.map((it) => (it.resume?.trim() ? applyJdAnalysisToItem(it, jobDescriptions) : it));
+    },
+    [applyJdAnalysisToItem]
+  );
+
+  const reanalyzeItemsForPosition = useCallback(
+    (position, jobDescriptions) => {
+      const pk = (position || '').trim();
+      if (!pk || !hasAnyJdContent(jobDescriptions)) return;
+      const source = getActiveBatchItems();
+      const next = source.map((it) => {
+        if (!it.resume?.trim()) return it;
+        const key = resolveJdKey(it.position, jobDescriptions, it.jdKey);
+        if (key !== pk) return it;
+        return applyJdAnalysisToItem(it, jobDescriptions);
+      });
+      setBatchItems(next);
+    },
+    [getActiveBatchItems, applyJdAnalysisToItem, setBatchItems]
+  );
+
+  const importPositionsToJdSlots = useCallback(
+    (positions) => {
+      const list = collectPositions(positions);
+      if (!list.length) {
+        showToast('名單中沒有職位欄位', 'error');
+        return;
+      }
+      setBatch((b) => {
+        const jobDescriptions = mergePositionSlots(b.jobDescriptions, list);
+        persistBatchSettings({ jobDescriptions });
+        const activeJdPosition = b.activeJdPosition || list[0];
+        return { ...b, jobDescriptions, activeJdPosition };
+      });
+      showToast(`已帶入 ${list.length} 個職位 JD 槽位`, 'success');
+    },
+    [persistBatchSettings, showToast]
+  );
+
+  const setActiveJdPosition = useCallback(
+    (position) => {
+      setBatch((b) => ({ ...b, activeJdPosition: position }));
+      persistBatchSettings({ activeJdPosition: position });
+    },
+    [persistBatchSettings]
+  );
+
+  const setJdTextForPosition = useCallback(
+    (position, text) => {
+      if (!position) return;
+      setBatch((b) => {
+        const jobDescriptions = { ...b.jobDescriptions, [position]: text };
+        persistBatchSettings({ jobDescriptions });
+        return { ...b, jobDescriptions, activeJdPosition: position };
+      });
+      reanalyzeItemsForPosition(position, {
+        ...batch.jobDescriptions,
+        [position]: text,
+      });
+      setSingle((s) => {
+        if (!s.resume?.trim()) return s;
+        const key = resolveJdKey(s.position, { ...batch.jobDescriptions, [position]: text }, s.jdKey);
+        if (key !== position && (s.position || '').trim() !== position) return s;
+        const jd = text.trim();
+        if (!jd) return s;
+        const analysis = analyzeResumeAgainstJd(s.resume, jd, s.position);
+        return {
+          ...s,
+          reason: analysis.suggestedReason || s.reason,
+          reasonDetail: analysis.reasonDetail,
+          jdMatch: analysis.matchSummary,
+        };
+      });
+    },
+    [persistBatchSettings, reanalyzeItemsForPosition, batch.jobDescriptions]
+  );
+
+  const analyzeJdForAll = useCallback(() => {
+    if (!hasAnyJdContent(batch.jobDescriptions)) {
+      showToast('請先為至少一個職位貼上 JD', 'error');
+      return;
+    }
+    const source = getActiveBatchItems();
+    if (!source.length) {
+      showToast('請先匯入應徵者名單', 'error');
+      return;
+    }
+    let matched = 0;
+    let skipped = 0;
+    const next = source.map((it) => {
+      if (!it.resume?.trim()) return it;
+      const jd = getJdText(batch.jobDescriptions, it.position, it.jdKey);
+      if (!jd) {
+        skipped++;
+        return it;
+      }
+      matched++;
+      return applyJdAnalysisToItem(it, batch.jobDescriptions);
+    });
+    setBatchItems(next);
+    const msg =
+      matched > 0
+        ? `已比對 ${matched} 位履歷`
+        : '名單中沒有履歷，請先上傳履歷檔';
+    showToast(skipped > 0 ? `${msg}（${skipped} 位找不到對應職位 JD）` : msg, matched > 0 ? 'success' : 'error');
+  }, [batch.jobDescriptions, getActiveBatchItems, applyJdAnalysisToItem, setBatchItems, showToast]);
+
+  const updateItemJdKey = useCallback(
+    (itemId, jdKey) => {
+      const item = getActiveBatchItems().find((it) => it.id === itemId);
+      if (!item) return;
+      const updated = applyJdAnalysisToItem({ ...item, jdKey }, batch.jobDescriptions);
+      patchBatchItem(itemId, {
+        jdKey: updated.jdKey || jdKey,
+        reason: updated.reason,
+        reasonDetail: updated.reasonDetail,
+        jdMatch: updated.jdMatch,
+      });
+      if (item.resume?.trim() && getJdText(batch.jobDescriptions, item.position, jdKey)) {
+        showToast(`已改用「${jdKey}」的 JD 比對`, 'success');
+      }
+    },
+    [batch.jobDescriptions, getActiveBatchItems, applyJdAnalysisToItem, patchBatchItem, showToast]
+  );
+
   const applyParsedRows = (parsed) => {
     const enriched = enrichRowsWithReason(parsed);
-    const items = enriched.map((row) =>
+    let items = enriched.map((row) =>
       newBatchItem({ ...row, reason: row.reason || defaultBatchReason })
     );
+    const jobDescriptions = mergePositionSlots(
+      batch.jobDescriptions,
+      collectPositions(enriched)
+    );
+    items = autoAnalyzeItemsWithJd(items, jobDescriptions);
     setCsvPreview(enriched);
     setBatchItems(items);
-    setBatch((b) => ({ ...b, processed: 0 }));
+    setBatch((b) => ({
+      ...b,
+      processed: 0,
+      jobDescriptions,
+      activeJdPosition: b.activeJdPosition || collectPositions(enriched)[0] || '',
+    }));
+    persistBatchSettings({ jobDescriptions });
     return items;
   };
+
+  const handleResumeFilesUpload = useCallback(
+    async (fileList) => {
+      const files = Array.from(fileList || []);
+      if (!files.length) return;
+
+      let items = getActiveBatchItems();
+      if (!items.length) {
+        showToast('請先匯入應徵者名單（姓名、職位）', 'error');
+        return;
+      }
+
+      let attached = 0;
+      let analyzed = 0;
+      let noJd = 0;
+      const unmatched = [];
+      const next = items.map((it) => ({ ...it }));
+
+      for (const file of files) {
+        try {
+          const text = await extractTextFromResumeFile(file);
+          if (!text || text.length < 20) {
+            unmatched.push(`${file.name}（內容過少）`);
+            continue;
+          }
+          const idx = matchResumeFileToApplicant(file.name, next);
+          if (idx < 0) {
+            unmatched.push(file.name);
+            continue;
+          }
+          const base = { ...next[idx], resume: text, resumeFileName: file.name };
+          const jd = getJdText(batch.jobDescriptions, base.position, base.jdKey);
+          if (jd) {
+            next[idx] = applyJdAnalysisToItem(base, batch.jobDescriptions);
+            analyzed++;
+          } else {
+            next[idx] = base;
+            noJd++;
+          }
+          attached++;
+        } catch (e) {
+          unmatched.push(`${file.name}（${e.message || '讀取失敗'}）`);
+        }
+      }
+
+      setBatchItems(next);
+      if (attached > 0) {
+        const extra =
+          noJd > 0 ? `（${noJd} 份找不到對應職位 JD，僅載入履歷）` : '';
+        showToast(
+          analyzed > 0
+            ? `已上傳 ${attached} 份，其中 ${analyzed} 份已完成 JD 比對${extra}`
+            : `已上傳 ${attached} 份履歷${extra}`,
+          'success'
+        );
+      }
+      if (unmatched.length) {
+        showToast(`無法對應名單：${unmatched.slice(0, 3).join('、')}${unmatched.length > 3 ? '…' : ''}`, 'error');
+      }
+      if (!attached && !unmatched.length) {
+        showToast('未選擇檔案', 'error');
+      }
+    },
+    [batch.jobDescriptions, getActiveBatchItems, applyJdAnalysisToItem, setBatchItems, showToast]
+  );
+
+  const handleSingleResumeFile = useCallback(
+    async (file) => {
+      const jd = getJdText(batch.jobDescriptions, single.position, single.jdKey);
+      try {
+        const text = await extractTextFromResumeFile(file);
+        if (!text || text.length < 20) {
+          showToast('履歷內容過少，請確認檔案', 'error');
+          return;
+        }
+        if (!single.position?.trim()) {
+          showToast('請先填寫應徵職位', 'error');
+          return;
+        }
+        const jobDescriptions = mergePositionSlots(batch.jobDescriptions, [single.position]);
+        setBatch((b) => ({ ...b, jobDescriptions }));
+        if (!jd) {
+          setSingle((s) => ({
+            ...s,
+            resume: text,
+            resumeFileName: file.name,
+            result: '',
+            lastGeneratedResume: '',
+          }));
+          showToast(`已載入履歷（請為「${single.position}」貼上 JD 後再比對）`, 'success');
+          return;
+        }
+        const analysis = analyzeResumeAgainstJd(text, jd, single.position);
+        setSingle((s) => ({
+          ...s,
+          resume: text,
+          resumeFileName: file.name,
+          reason: analysis.suggestedReason || s.reason,
+          reasonDetail: analysis.reasonDetail,
+          jdMatch: analysis.matchSummary,
+          result: '',
+          lastGeneratedResume: '',
+        }));
+        showToast(`已載入履歷並比對「${resolveJdKey(single.position, jobDescriptions)}」JD`, 'success');
+      } catch (e) {
+        showToast(e.message || '履歷讀取失敗', 'error');
+      }
+    },
+    [batch.jobDescriptions, single.position, single.jdKey, showToast]
+  );
+
+  const handleItemResumeFile = useCallback(
+    async (itemId, file) => {
+      if (!file) return;
+      try {
+        const text = await extractTextFromResumeFile(file);
+        const item = getActiveBatchItems().find((it) => it.id === itemId);
+        if (!item) return;
+        const base = { ...item, resume: text, resumeFileName: file.name };
+        const jd = getJdText(batch.jobDescriptions, base.position, base.jdKey);
+        const updated = jd ? applyJdAnalysisToItem(base, batch.jobDescriptions) : base;
+        patchBatchItem(itemId, {
+          resume: updated.resume,
+          resumeFileName: updated.resumeFileName,
+          reason: updated.reason,
+          reasonDetail: updated.reasonDetail,
+          jdMatch: updated.jdMatch,
+          jdKey: updated.jdKey,
+          expanded: true,
+        });
+        if (jd) {
+          showToast(`已載入並比對「${resolveJdKey(item.position, batch.jobDescriptions, item.jdKey)}」JD`, 'success');
+        } else {
+          showToast(`已載入履歷（請為「${item.position}」設定 JD）`, 'success');
+        }
+      } catch (e) {
+        showToast(e.message || '履歷讀取失敗', 'error');
+      }
+    },
+    [batch.jobDescriptions, getActiveBatchItems, applyJdAnalysisToItem, patchBatchItem, showToast]
+  );
 
   const parseCsv = () => {
     const parsed = parseCsvContent(batch.csvText, defaultBatchReason);
@@ -250,7 +568,12 @@ export default function App() {
       return [];
     }
     const items = applyParsedRows(parsed);
-    showToast(`已載入 ${parsed.length} 位。請按「開始批量生成」產生感謝信`);
+    const positions = collectPositions(parsed);
+    showToast(
+      positions.length
+        ? `已載入 ${parsed.length} 位、${positions.length} 個職位。請在左側為各職位貼上 JD`
+        : `已載入 ${parsed.length} 位。可開始批量生成（上傳履歷比對需先設定職位 JD）`
+    );
     return items;
   };
 
@@ -289,7 +612,8 @@ export default function App() {
 
   const processItem = async (item) => {
     const reason = item.reason?.trim() || defaultBatchReason;
-    const payload = { ...item, reason };
+    const reasonDetail = (item.reasonDetail || '').trim();
+    const payload = { ...item, reason, reasonDetail };
 
     if (!payload.name?.trim() || !payload.position?.trim()) {
       patchBatchItem(payload.id, { status: 'error', error: '缺少姓名或職位', expanded: true });
@@ -297,6 +621,7 @@ export default function App() {
     }
 
     const itemId = payload.id;
+    patchBatchItem(itemId, { status: 'processing', error: '', expanded: true });
     const params = letterParams(payload);
     try {
       const text = generateLetterLocal(params);
@@ -310,6 +635,7 @@ export default function App() {
         error: '',
         expanded: true,
         reason,
+        reasonDetail,
       });
       return { ...payload, status: 'done', result: text };
     } catch (e) {
@@ -602,6 +928,23 @@ export default function App() {
             onSendEmail={sendSingleEmail}
             isSendingEmail={batch.isSendingEmail}
             directSendEnabled={directSendEnabled}
+            jobDescriptions={batch.jobDescriptions}
+            activeJdPosition={batch.activeJdPosition || single.position}
+            onActiveJdPositionChange={setActiveJdPosition}
+            onJdTextChange={setJdTextForPosition}
+            onImportPositionsFromList={() =>
+              importPositionsToJdSlots(single.position ? [single.position] : [])
+            }
+            onEnsurePositionSlot={(position) => {
+              const p = (position || '').trim();
+              if (!p) return;
+              setBatch((b) => {
+                const jobDescriptions = mergePositionSlots(b.jobDescriptions, [p]);
+                persistBatchSettings({ jobDescriptions });
+                return { ...b, jobDescriptions, activeJdPosition: p };
+              });
+            }}
+            onResumeFile={handleSingleResumeFile}
           />
         ) : (
           <BatchMode
@@ -613,11 +956,19 @@ export default function App() {
             autoDetectReason={autoDetectReason}
             setAutoDetectReason={(v) => {
               setAutoDetectReason(v);
-              persistBatchSettings(v);
+              persistBatchSettings({ autoDetectReason: v });
             }}
+            jobDescriptions={batch.jobDescriptions}
+            activeJdPosition={batch.activeJdPosition}
+            onActiveJdPositionChange={setActiveJdPosition}
+            onJdTextChange={setJdTextForPosition}
+            onImportPositionsFromList={() => importPositionsToJdSlots(getActiveBatchItems())}
+            onAnalyzeJdForAll={analyzeJdForAll}
             onApplyReasonToAll={applyReasonToAll}
             onItemReasonChange={updateItemReason}
-            onItemResumeChange={updateItemResume}
+            onItemJdKeyChange={updateItemJdKey}
+            onResumeFilesUpload={handleResumeFilesUpload}
+            onItemResumeFile={handleItemResumeFile}
             tone={tone}
             onParseCsv={parseCsv}
             onParseCsvAndGenerate={parseCsvAndGenerate}

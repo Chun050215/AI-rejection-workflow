@@ -1,9 +1,12 @@
 import { useRef, useMemo } from 'react';
 import { REASONS } from '../constants';
 import { SPREADSHEET_ACCEPT, NUMBERS_FILE_ACCEPT } from '../constants/spreadsheetAccept';
+import { RESUME_FILE_ACCEPT } from '../constants/resumeFileAccept';
 import BatchItem from './BatchItem';
+import JobDescriptionEditor from './JobDescriptionEditor';
 import ProgressBar from './ProgressBar';
 import HumanReviewNotice from './HumanReviewNotice';
+import { collectPositions, hasAnyJdContent, getJdText } from '../utils/jdStore';
 
 export default function BatchMode({
   batch,
@@ -15,7 +18,8 @@ export default function BatchMode({
   setAutoDetectReason,
   onApplyReasonToAll,
   onItemReasonChange,
-  onItemResumeChange,
+  onItemResumeFile,
+  onResumeFilesUpload,
   tone,
   onParseCsv,
   onParseCsvAndGenerate,
@@ -39,37 +43,58 @@ export default function BatchMode({
   emailSendPercent,
   sendableCount,
   directSendEnabled,
+  jobDescriptions = {},
+  activeJdPosition = '',
+  onActiveJdPositionChange,
+  onJdTextChange,
+  onImportPositionsFromList,
+  onAnalyzeJdForAll,
+  onItemJdKeyChange,
 }) {
   const fileInputRef = useRef(null);
   const numbersFileInputRef = useRef(null);
   const anyFileInputRef = useRef(null);
+  const resumeFilesInputRef = useRef(null);
   const batchErrorCount = batch.items.filter((i) => i.status === 'error').length;
   const csvPreviewLimited = useMemo(() => csvPreview.slice(0, 20), [csvPreview]);
   const csvPreviewMore = Math.max(0, csvPreview.length - 20);
+  const hasJd = hasAnyJdContent(jobDescriptions);
+  const positionSuggestions = useMemo(
+    () => collectPositions(batch.items),
+    [batch.items]
+  );
+  const resumeCount = useMemo(
+    () => batch.items.filter((i) => (i.resume || '').trim() || i.resumeFileName).length,
+    [batch.items]
+  );
+  const canGenerate = batch.items.length > 0 && !batch.isProcessing;
 
   return (
     <div className="batch-layout">
       <div className="batch-side">
         <div className="card">
-          <div className="card-title">匯入應徵者名單</div>
+          <div className="card-title">① 職缺說明 JD（依職位）</div>
           <p className="csv-hint">
-            支援上傳 <strong>CSV</strong>、<strong>Excel（.xlsx）</strong>、<strong>Numbers（.numbers）</strong>，或直接<strong>貼上內容</strong>。
-            <br />
-            最簡格式：<code>姓名,職位</code> 或 <code>姓名,職位,Email</code>（<strong>不必填婉拒原因</strong>，系統自動套用）
-            <br />
-            請按 <strong>「Numbers 檔」</strong> 按鈕選取 .numbers；若仍看不到，按 <strong>「所有檔案…」</strong>
-            <br />
-            進階：可加 <code>履歷</code>、<code>備註</code> 欄
+            不同職位可設定不同 JD。上傳履歷時會依應徵者的<strong>職位</strong>自動選用對應 JD 比對。
+          </p>
+          <JobDescriptionEditor
+            jobDescriptions={jobDescriptions}
+            activePosition={activeJdPosition}
+            onActivePositionChange={onActiveJdPositionChange}
+            onJdTextChange={onJdTextChange}
+            positionSuggestions={positionSuggestions}
+            onImportFromList={onImportPositionsFromList}
+          />
+        </div>
+
+        <div className="card" style={{ marginTop: 12 }}>
+          <div className="card-title">② 匯入應徵者名單</div>
+          <p className="csv-hint">
+            格式：<code>姓名,職位</code> 或 <code>姓名,職位,Email</code>（不必在 CSV 貼整份履歷）
           </p>
 
           <div className="csv-upload-row">
-            <input
-              ref={fileInputRef}
-              type="file"
-              accept={SPREADSHEET_ACCEPT}
-              hidden
-              onChange={onCsvFile}
-            />
+            <input ref={fileInputRef} type="file" accept={SPREADSHEET_ACCEPT} hidden onChange={onCsvFile} />
             <input
               ref={numbersFileInputRef}
               type="file"
@@ -88,12 +113,7 @@ export default function BatchMode({
               📊 Numbers 檔
             </button>
             <input ref={anyFileInputRef} type="file" hidden onChange={onCsvFile} />
-            <button
-              type="button"
-              className="btn btn-secondary btn-sm"
-              title="顯示所有檔案類型（含 .numbers）"
-              onClick={() => anyFileInputRef.current?.click()}
-            >
+            <button type="button" className="btn btn-secondary btn-sm" onClick={() => anyFileInputRef.current?.click()}>
               所有檔案…
             </button>
             {batch.fileName && <span className="csv-filename">{batch.fileName}</span>}
@@ -102,13 +122,67 @@ export default function BatchMode({
           <textarea
             value={batch.csvText}
             onChange={(e) => setBatch((b) => ({ ...b, csvText: e.target.value }))}
-            placeholder={'姓名,職位,Email\n王小明,行銷企劃專員,xiaoming@email.com\n林美華,產品經理,mei@email.com\n陳大文,資深工程師,chen@email.com'}
-            rows={14}
+            placeholder={'姓名,職位,Email\n王小明,行銷企劃專員,xiaoming@email.com\n林美華,產品經理,mei@email.com'}
+            rows={8}
             style={{ fontFamily: 'var(--mono)', fontSize: '0.8rem' }}
           />
 
+          <div className="btn-row" style={{ marginTop: 8 }}>
+            <button type="button" className="btn btn-secondary btn-sm" onClick={onParseCsv}>
+              載入名單
+            </button>
+            {batch.items.length > 0 && (
+              <button type="button" className="btn btn-secondary btn-sm" onClick={onClearBatch} disabled={batch.isProcessing}>
+                清除
+              </button>
+            )}
+          </div>
+        </div>
+
+        <div className="card" style={{ marginTop: 12 }}>
+          <div className="card-title">③ 上傳履歷檔（選填，自動比對 JD）</div>
+          <p className="csv-hint">
+            <strong>不必每位都上傳。</strong>支援 PDF、Word、TXT，檔名請含<strong>姓名</strong>（例：<code>王小明.pdf</code>），可多選一次上傳；有履歷才比對 JD。
+          </p>
+          <input
+            ref={resumeFilesInputRef}
+            type="file"
+            accept={RESUME_FILE_ACCEPT}
+            multiple
+            hidden
+            onChange={(e) => {
+              onResumeFilesUpload(e.target.files);
+              e.target.value = '';
+            }}
+          />
+          <button
+            type="button"
+            className="btn btn-primary btn-sm"
+            disabled={!batch.items.length || batch.isProcessing}
+            onClick={() => resumeFilesInputRef.current?.click()}
+          >
+            📎 選擇履歷檔（可多選）
+          </button>
+          {!batch.items.length && <p className="csv-preview-note warn">請先完成步驟 ② 載入名單</p>}
+          {batch.items.length > 0 && !hasJd && (
+            <p className="csv-preview-note warn">尚未設定任何職位 JD，履歷僅會載入、不會比對</p>
+          )}
+          {batch.items.length > 0 && hasJd && (
+            <button
+              type="button"
+              className="btn btn-secondary btn-sm"
+              style={{ marginLeft: 8 }}
+              onClick={onAnalyzeJdForAll}
+              disabled={batch.isProcessing}
+            >
+              🔄 重新比對全部
+            </button>
+          )}
+        </div>
+
+        <div className="card" style={{ marginTop: 12 }}>
           <div className="csv-default-reason">
-            <label>婉拒原因（自動套用到全部應徵者）</label>
+            <label>預設婉拒原因類別</label>
             <select
               value={defaultBatchReason}
               onChange={(e) => setDefaultBatchReason(e.target.value)}
@@ -127,181 +201,142 @@ export default function BatchMode({
                 checked={autoDetectReason}
                 onChange={(e) => setAutoDetectReason(e.target.checked)}
               />
-              <label htmlFor="autoDetectReason">依備註／職位關鍵字自動判斷原因</label>
+              <label htmlFor="autoDetectReason">依備註／職位關鍵字自動判斷類別</label>
             </div>
-            {batch.items.length > 0 && (
-              <button
-                type="button"
-                className="btn btn-secondary btn-sm"
-                style={{ marginTop: 10 }}
-                onClick={onApplyReasonToAll}
-                disabled={batch.isProcessing}
-              >
-                重新套用至全部名單
-              </button>
-            )}
-          </div>
-
-          <div className="btn-row">
-            <button type="button" className="btn btn-secondary btn-sm" onClick={onParseCsv}>
-              ① 僅載入名單
-            </button>
-            {batch.items.length > 0 && (
-              <button
-                type="button"
-                className="btn btn-secondary btn-sm"
-                onClick={onClearBatch}
-                disabled={batch.isProcessing}
-              >
-                清除名單
-              </button>
-            )}
           </div>
 
           {batch.items.length > 0 && (
-            <div className="csv-summary csv-summary-warn">
-              已載入 <strong>{batch.items.length}</strong> 位。
-              <br />
-              <strong>「僅載入名單」不會生成信件</strong>，請按「② 開始批量生成」或「載入並生成感謝信」
-            </div>
+            <>
+              <button
+                type="button"
+                className="btn btn-gold"
+                style={{ marginTop: 12, width: '100%' }}
+                onClick={onStartBatch}
+                disabled={!canGenerate}
+              >
+                ⚡ 開始批量生成
+              </button>
+              <p className="csv-preview-note" style={{ marginTop: 8 }}>
+                已載入 {batch.items.length} 人
+                {resumeCount > 0 ? ` · 履歷 ${resumeCount} 份（其餘僅用類別套話）` : ' · 未上傳履歷，將僅用婉拒類別套話'}
+              </p>
+              <button
+                type="button"
+                className="btn btn-secondary btn-sm"
+                style={{ marginTop: 8, width: '100%' }}
+                onClick={onParseCsvAndGenerate}
+                disabled={!canGenerate}
+              >
+                重新載入名單並生成
+              </button>
+            </>
           )}
 
           {csvPreviewLimited.length > 0 && (
-            <>
-              <table className="csv-table">
-                <thead>
-                  <tr>
-                    <th>#</th>
-                    <th>姓名</th>
-                    <th>職位</th>
-                    <th>Email</th>
-                    <th>原因</th>
-                    <th>履歷</th>
+            <table className="csv-table" style={{ marginTop: 12 }}>
+              <thead>
+                <tr>
+                  <th>#</th>
+                  <th>姓名</th>
+                  <th>職位</th>
+                  <th>JD</th>
+                  <th>履歷</th>
+                </tr>
+              </thead>
+              <tbody>
+                {csvPreviewLimited.map((row, i) => {
+                  const item = batch.items[i];
+                  const jdOk = getJdText(jobDescriptions, row.position, item?.jdKey);
+                  return (
+                  <tr key={i}>
+                    <td>{i + 1}</td>
+                    <td>{row.name}</td>
+                    <td>{row.position}</td>
+                    <td className={jdOk ? 'csv-cell-resume' : ''}>{jdOk ? '✓' : '—'}</td>
+                    <td>{item?.resume || item?.resumeFileName ? '✓' : '—'}</td>
                   </tr>
-                </thead>
-                <tbody>
-                  {csvPreviewLimited.map((row, i) => (
-                    <tr key={i}>
-                      <td>{i + 1}</td>
-                      <td>{row.name}</td>
-                      <td>{row.position}</td>
-                      <td>{row.email || '—'}</td>
-                      <td>{row.reason}</td>
-                      <td className="csv-cell-resume">{row.resume ? '✓ 已提供' : '—'}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-              {csvPreviewMore > 0 && (
-                <p className="csv-preview-note">預覽前 20 筆，另有 {csvPreviewMore} 筆未顯示</p>
-              )}
-            </>
+                );})}
+              </tbody>
+            </table>
           )}
         </div>
-
-        <div className="btn-row batch-generate-row">
-          <button
-            type="button"
-            className="btn btn-gold"
-            disabled={batch.isProcessing || !batch.csvText.trim()}
-            onClick={onParseCsvAndGenerate}
-          >
-            {batch.isProcessing ? '生成中...' : '⚡ 載入並生成感謝信'}
-          </button>
-          <button
-            type="button"
-            className="btn btn-primary"
-            disabled={batch.isProcessing || !batch.items.length}
-            onClick={onStartBatch}
-          >
-            {batch.isProcessing ? '生成中...' : '② 開始批量生成'}
-            {batch.items.length > 0 && !batch.isProcessing && `（${batch.items.length} 筆）`}
-          </button>
-        </div>
-
-        {(batch.isProcessing || batch.processed > 0) && (
-          <ProgressBar
-            label="生成進度"
-            done={batch.isProcessing ? Math.max(batch.processed, batchDoneCount) : batchDoneCount}
-            total={batchTotalCount}
-            percent={
-              batchTotalCount
-                ? Math.round(
-                    (Math.max(batch.isProcessing ? batch.processed : 0, batchDoneCount) / batchTotalCount) * 100
-                  )
-                : 0
-            }
-          />
-        )}
-
-        {batch.isSendingEmail && (
-          <ProgressBar
-            label="Email 寄送進度"
-            done={emailSendDone}
-            total={emailSendTotal}
-            percent={emailSendPercent}
-          />
-        )}
       </div>
 
       <div className="batch-main">
+        {batch.isProcessing && (
+          <ProgressBar label="批量生成進度" percent={progressPercent} detail={`${batch.processed} / ${batchTotalCount}`} />
+        )}
+        {batch.isSendingEmail && (
+          <ProgressBar label="寄信進度" percent={emailSendPercent} detail={`${emailSendDone} / ${emailSendTotal}`} />
+        )}
+
         {batch.items.length > 0 && batchDoneCount === 0 && !batch.isProcessing && (
           <div className="batch-main-cta">
-            名單已載入，請按左側 <strong>「② 開始批量生成」</strong> 或 <strong>「載入並生成感謝信」</strong>
+            <p>
+              名單已載入 {batch.items.length} 人
+              {resumeCount > 0
+                ? `（履歷 ${resumeCount} 份，其餘僅類別套話）`
+                : '（可選上傳履歷以產生個別理由）'}
+            </p>
+            <button
+              type="button"
+              className="btn btn-gold"
+              style={{ marginTop: 10 }}
+              onClick={onStartBatch}
+              disabled={!canGenerate}
+            >
+              ⚡ 開始批量生成
+            </button>
           </div>
         )}
-        {batch.items.length > 0 &&
-          batch.items.map((item, idx) => (
-            <BatchItem
-              key={item.id}
-              item={item}
-              index={idx}
-              isSendingEmail={batch.isSendingEmail}
-              onToggle={onToggle}
-              onCopy={onCopy}
-              onSend={onSendItemEmail}
-              directSendEnabled={directSendEnabled}
-              onRetry={onRetryItem}
-              onReasonChange={onItemReasonChange}
-              onResumeChange={onItemResumeChange}
-              tone={tone}
-            />
-          ))}
+
+        {batch.items.map((item, idx) => (
+          <BatchItem
+            key={item.id}
+            item={item}
+            index={idx}
+            isSendingEmail={batch.isSendingEmail}
+            onToggle={onToggle}
+            onCopy={onCopy}
+            onSend={onSendItemEmail}
+            directSendEnabled={directSendEnabled}
+            onRetry={onRetryItem}
+            onReasonChange={onItemReasonChange}
+            onResumeFile={onItemResumeFile}
+            jobDescriptions={jobDescriptions}
+            onJdKeyChange={onItemJdKeyChange}
+            tone={tone}
+          />
+        ))}
 
         {batchDoneCount > 0 && !batch.isProcessing && (
           <>
             <HumanReviewNotice />
             <div className="btn-row">
-            <button
-              type="button"
-              className="btn btn-gold"
-              onClick={() => onSendBatchEmails()}
-              disabled={batch.isSendingEmail || !sendableCount}
-            >
-              {batch.isSendingEmail
-                ? directSendEnabled
-                  ? '寄送中...'
-                  : '開啟 Gmail 中...'
-                : directSendEnabled
-                  ? '📧 確認並批量自動寄出'
-                  : '📧 用 Gmail 批量開啟（需手動傳送）'}
-              {sendableCount > 0 && !batch.isSendingEmail && `（${sendableCount} 封）`}
-            </button>
-            <button type="button" className="btn btn-secondary" onClick={onDownloadMailMerge}>
-              📊 下載郵件合併 CSV
-            </button>
-            <button type="button" className="btn btn-gold" onClick={onCopyAll}>
-              📋 複製全部
-            </button>
-            <button type="button" className="btn btn-secondary" onClick={onDownloadTxt}>
-              ⬇ 下載 TXT
-            </button>
+              <button
+                type="button"
+                className="btn btn-gold"
+                onClick={() => onSendBatchEmails()}
+                disabled={batch.isSendingEmail || !sendableCount}
+              >
+                {directSendEnabled ? '📧 確認並批量自動寄出' : '📧 用 Gmail 批量開啟（需手動傳送）'}
+                {sendableCount > 0 && `（${sendableCount} 封）`}
+              </button>
+              <button type="button" className="btn btn-secondary" onClick={onDownloadMailMerge}>
+                📊 下載郵件合併 CSV
+              </button>
+              <button type="button" className="btn btn-gold" onClick={onCopyAll}>
+                📋 複製全部
+              </button>
+              <button type="button" className="btn btn-secondary" onClick={onDownloadTxt}>
+                ⬇ 下載 TXT
+              </button>
+            </div>
             {batchErrorCount > 0 && (
-              <button type="button" className="btn btn-secondary" onClick={onRetryFailed}>
-                🔄 重新生成失敗項目
+              <button type="button" className="btn btn-secondary" style={{ marginTop: 8 }} onClick={onRetryFailed}>
+                🔄 重試失敗項目（{batchErrorCount}）
               </button>
             )}
-          </div>
           </>
         )}
       </div>

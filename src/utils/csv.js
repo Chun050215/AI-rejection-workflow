@@ -39,8 +39,9 @@ function buildColumnMap(headers) {
     if (/^姓名|^name/.test(t)) map.name = i;
     else if (/職位|position|職務|岗位/.test(t)) map.position = i;
     else if (/email|信箱|郵件|e-mail/.test(t)) map.email = i;
+    else if (/個別|未錄取理由|詳細原因|reasondetail/.test(t)) map.reasonDetail = i;
     else if (/原因|reason|婉拒/.test(t)) map.reason = i;
-    else if (/備註|評語|說明|notes|note|評估|不符|comment/.test(t)) map.note = i;
+    else if (/備註|評語|notes|note|評估|comment/.test(t)) map.note = i;
     else if (/履歷|简历|resume|cv|履歷摘要/.test(t)) map.resume = i;
   });
   return map;
@@ -56,7 +57,7 @@ function parseApplicantRowPositional(parts, defaultReason) {
   let note = '';
 
   if (parts.length === 2) {
-    return { name, position, email, reason: '', note: '', resume: '' };
+    return { name, position, email, reason: '', reasonDetail: '', note: '', resume: '' };
   }
 
   if (parts.length === 3) {
@@ -66,7 +67,8 @@ function parseApplicantRowPositional(parts, defaultReason) {
     else if (REASONS.includes(p2)) reason = p2;
     else if (p2.length >= 20) resume = p2;
     else note = p2;
-    return { name, position, email, reason, note, resume };
+    const reasonDetail = !reason && note && !REASONS.includes(note) ? note : '';
+    return { name, position, email, reason, reasonDetail, note: reasonDetail ? '' : note, resume };
   }
 
   if (parts.length >= 4) {
@@ -96,10 +98,15 @@ function parseApplicantRowPositional(parts, defaultReason) {
     if (parts.length === 4 && !email && !REASONS.includes(p2) && !REASONS.includes(p3) && p2.length >= 15) {
       resume = p2;
     }
-    return { name, position, email, reason, note, resume };
+    let reasonDetail = '';
+    if (note && !REASONS.includes(note) && note.length >= 4) {
+      reasonDetail = note;
+      note = '';
+    }
+    return { name, position, email, reason, reasonDetail, note, resume };
   }
 
-  return { name, position, email, reason, note, resume: '' };
+  return { name, position, email, reason, reasonDetail: '', note, resume: '' };
 }
 
 function parseApplicantRowMapped(parts, map) {
@@ -108,12 +115,27 @@ function parseApplicantRowMapped(parts, map) {
   const position = get('position');
   if (!name || !position) return null;
 
+  const rawReason = get('reason');
+  let reason = '';
+  let reasonDetail = get('reasonDetail');
+  if (REASONS.includes(rawReason)) {
+    reason = rawReason;
+  } else if (rawReason) {
+    reasonDetail = reasonDetail || rawReason;
+  }
+
+  const note = get('note');
+  if (!reasonDetail && note && note.length >= 4 && !REASONS.includes(note)) {
+    reasonDetail = note;
+  }
+
   return {
     name,
     position,
     email: get('email'),
-    reason: get('reason'),
-    note: get('note'),
+    reason,
+    reasonDetail: reasonDetail || '',
+    note,
     resume: get('resume'),
   };
 }
